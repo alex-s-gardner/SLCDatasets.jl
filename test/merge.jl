@@ -205,11 +205,12 @@ if !isempty(S1_PRODUCTS)
             @test_throws "annotation only" pixels(m)
         end
 
-        # A backend that reads metadata alone should say so rather than fail on dispatch with a
-        # `MethodError` naming an internal type.
+        # A NISAR product reads its samples, so what a fixture carrying no sample array should say is
+        # which dataset is absent — not that the backend cannot read one, and not a `MethodError`
+        # naming an internal type.
         mktempdir() do dir
             nisar = open_slc(write_fixture_product(joinpath(dir, "fixture_rslc.h5")))
-            @test_throws "reads metadata only" pixels(nisar)
+            @test_throws "has no HH" pixels(nisar)
             @test_throws "not a merge of bursts" grid(nisar)
         end
         # A single burst is not a merge either, so it has no grid.

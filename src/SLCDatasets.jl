@@ -57,6 +57,10 @@ export SLC, SLCSeries, Identification, RadarGeometry, StateVectors
 export Sentinel1Product
 export LocalFile, RemoteHTTP, RemoteS3
 export AsfBurst, asf_bursts
+# `grid` stays unexported for the reason `LookSide` does: a raster or geometry package consuming this one
+# defines its own, and exporting both makes the name ambiguous at every call site. `GeocodedProduct`
+# carries it as a field, and `geocoded_grid` reads one from a backend.
+export open_geocoded, GeocodedProduct, GeocodedGrid, geocoded_grid
 
 # `LookSide`, `LookLeft` and `LookRight` are deliberately not exported: a geometry package consuming
 # this one defines its own, and exporting both makes the name ambiguous at every call site.

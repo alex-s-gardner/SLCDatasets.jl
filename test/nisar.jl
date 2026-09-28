@@ -5,7 +5,7 @@
 
 using SLCDatasets
 using SLCDatasets: LookSide, LookLeft, LookRight, SPEED_OF_LIGHT, parse_cf_epoch, NisarBackend, nisar_band,
-           nisar_product_type, GEOCODED_TYPES
+           nisar_product_type, GEOCODED_TYPES, grid
 using Dates
 using HDF5
 using StaticArrays: SVector
@@ -217,5 +217,67 @@ end
         end
         @test "GSLC" in GEOCODED_TYPES
         @test_throws "carries no slant-range/azimuth geometry" open_slc(path)
+    end
+end
+
+@testset "samples" begin
+    # `(line, sample)` on the way out, whatever the file's layout: the dataset is written transposed, so
+    # a reader that forgot to transpose would return this array's transpose and every assertion here
+    # would fail on a shape.
+    A = ComplexF32[complex(i, j) for i in 1:7, j in 1:5]
+    mktempdir() do dir
+        path = write_fixture_product(joinpath(dir, "rslc_with_samples.h5"); samples = A)
+        s = open_slc(path)
+        p = pixels(s)
+
+        @test p isa SLCDatasets.NisarRaster{ComplexF32}
+        @test size(p) == (7, 5)
+        @test p[:, :] == A
+        @test p[3, 4] === A[3, 4]
+        @test p[2:5, 2:3] == A[2:5, 2:3]
+        @test p[2:5, 3] == A[2:5, 3]
+        @test p[4, 2:4] == A[4, 2:4]
+        # A window is the same values as the whole read, which is what says the hyperslab offsets are
+        # applied to the axis they belong to rather than to the other one.
+        @test all(p[i:i, j:j][1, 1] === A[i, j] for i in axes(A, 1), j in axes(A, 2))
+
+        @test amplitude(s) == abs.(A)
+        @test_throws BoundsError p[1:8, 1:5]
+    end
+end
+
+@testset "a product carrying no samples says so" begin
+    # The fixture without a sample array is the state a metadata-only read leaves: the polarization is
+    # listed and the dataset is absent, which is a different failure from an unreadable file.
+    mktempdir() do dir
+        path = write_fixture_product(joinpath(dir, "rslc_no_samples.h5"))
+        @test_throws "has no HH" pixels(open_slc(path))
+    end
+end
+
+@testset "a geocoded product opens through its own door" begin
+    A = ComplexF32[complex(i, -j) for i in 1:4, j in 1:6]
+    mktempdir() do dir
+        path = write_fixture_geocoded(joinpath(dir, "gslc.h5"); samples = A)
+        g = open_geocoded(path)
+
+        @test g isa GeocodedProduct
+        @test g.identification.product_type == "GSLC"
+        @test nlines(g) == 4
+        @test nsamples(g) == 6
+        # The product stores pixel *centers* and a grid names the outer corner, so the origin sits half a
+        # pixel out along each axis — the convention a geotransform states and an intersection needs.
+        @test grid(g).origin == (-340558.75 - 1.25, -2.1067225e6 + 2.5)
+        @test grid(g).spacing == (2.5, -5.0)
+        @test grid(g).size == (4, 6)
+        @test grid(g).epsg == 3413
+        @test pixels(g)[:, :] == A
+        @test pixels(g)[2:3, 4:5] == A[2:3, 4:5]
+
+        # The two doors stay separate: a geocoded product has no slant-range axis to describe, and a
+        # radar-geometry one has no map grid.
+        @test_throws "carries no slant-range/azimuth geometry" open_slc(path)
+        rslc = write_fixture_product(joinpath(dir, "rslc.h5"))
+        @test_throws "lies in radar geometry" open_geocoded(rslc)
     end
 end

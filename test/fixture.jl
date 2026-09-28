@@ -65,7 +65,7 @@ Write `fx` as a NISAR-layout HDF5 product at `path`.
 Only the datasets the reader reads are written, with the group names and the `units` attributes a real
 product carries.
 """
-function write_fixture_product(path::AbstractString, fx = FIXTURE)
+function write_fixture_product(path::AbstractString, fx = FIXTURE; samples = nothing)
     band, product, freq = fx.band, fx.product_type, fx.frequency
     id, geom, orb = fx.identification, fx.geometry, fx.orbit
 
@@ -111,6 +111,47 @@ function write_fixture_product(path::AbstractString, fx = FIXTURE)
 
         write_attribute(h["$p/swaths/zeroDopplerTime"], "units", geom.epoch)
         write_attribute(h["$p/metadata/orbit/time"], "units", orb.epoch)
+
+        # The samples, written in the file's own layout: azimuth slowest, so the dataset is the
+        # transpose of the `(line, sample)` array a reader hands back. Small, because what is under test
+        # is the read and the transpose rather than a product's real extent.
+        samples === nothing || (h["$p/swaths/frequency$freq/HH"] = permutedims(samples))
+    end
+    return path
+end
+
+"""
+    write_fixture_geocoded(path; samples, origin, spacing, epsg) -> String
+
+A minimal geocoded NISAR product: a `grids` group with its coordinate axes and a sample array.
+
+`origin` names the **first pixel's center**, as a product does; the grid a reader reports pulls that back
+by half a pixel to the corner.
+"""
+function write_fixture_geocoded(path::AbstractString; samples::AbstractMatrix,
+                                origin::Tuple{Real,Real} = (-340558.75, -2.1067225e6),
+                                spacing::Tuple{Real,Real} = (2.5, -5.0), epsg::Integer = 3413)
+    ny, nx = size(samples)
+    h5open(path, "w") do h
+        ip = "science/LSAR/identification"
+        h["$ip/missionId"] = "NISAR"
+        h["$ip/productType"] = "GSLC"
+        h["$ip/absoluteOrbitNumber"] = Int32(1)
+        h["$ip/orbitPassDirection"] = "Descending"
+        h["$ip/lookDirection"] = "Right"
+        h["$ip/zeroDopplerStartTime"] = "2025-10-28T23:52:01.000000000"
+        h["$ip/zeroDopplerEndTime"] = "2025-10-28T23:52:38.000000000"
+        h["$ip/boundingPolygon"] = "POLYGON EMPTY"
+        h["$ip/listOfFrequencies"] = ["A"]
+
+        g = "science/LSAR/GSLC/grids/frequencyA"
+        h["$g/xCoordinates"] = collect(range(origin[1]; step = spacing[1], length = nx))
+        h["$g/yCoordinates"] = collect(range(origin[2]; step = spacing[2], length = ny))
+        h["$g/xCoordinateSpacing"] = Float64(spacing[1])
+        h["$g/yCoordinateSpacing"] = Float64(spacing[2])
+        h["$g/projection"] = UInt32(epsg)
+        h["$g/listOfPolarizations"] = ["HH"]
+        h["$g/HH"] = permutedims(samples)
     end
     return path
 end
