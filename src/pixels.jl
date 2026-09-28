@@ -1,10 +1,10 @@
 # Reaching an acquisition's samples, and the amplitude of them.
 #
-# Reading samples is not something every product this package opens can do: a NISAR product's metadata
-# is read from the head of a file whose image is never fetched, and a Sentinel-1 product read from a zip
-# cannot reach its raster at all — the entry is deflated, so a line is not addressable without inflating
-# everything before it. So `pixels` is a backend method a backend may not have, and a backend without
-# one says why rather than raising a `MethodError` naming an internal type.
+# Reading samples is not something every product this package opens can do: a Sentinel-1 product read
+# from a zip cannot reach its raster at all — the entry is deflated, so a line is not addressable without
+# inflating everything before it — and a product rebuilt from metadata alone has no sample array to read.
+# So `pixels` is a backend method a backend may not have, and a backend without one says why rather than
+# raising a `MethodError` naming an internal type.
 #
 # Amplitude is a view rather than a read. The reference pipeline correlates `abs` of the samples and
 # discards the phase, but `AutoRIFT.jl` can also correlate the complex samples directly, so the phase is
@@ -21,7 +21,8 @@ burst spanned, while scalar indexing resolves a row per sample.
 
 Not every product can reach its samples. A Sentinel-1 product read from a zip cannot — the raster is
 deflated inside it — and neither can a remote product whose image was never transferred; both say so
-rather than returning something partial. [`amplitude`](@ref) for the real magnitudes, and
+rather than returning something partial. A NISAR product reads its samples out of its HDF5 dataset a
+window at a time; see [`SLCDatasets.NisarRaster`](@ref). [`amplitude`](@ref) for the real magnitudes, and
 [`validmask`](@ref) for which samples were imaged.
 """
 pixels(s::AbstractSLC) = read_pixels(s.backend)

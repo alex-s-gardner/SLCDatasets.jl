@@ -247,3 +247,164 @@ function _columns_as_svectors(a::AbstractMatrix{Float64})
     Base.require_one_based_indexing(a)
     return [SVector{3,Float64}(a[1, i], a[2, i], a[3, i]) for i in axes(a, 2)]
 end
+
+# ---------------------------------------------------------------------------
+# Samples
+# ---------------------------------------------------------------------------
+
+"""
+    NisarRaster{T} <: AbstractMatrix{T}
+
+A NISAR product's sample array, read a window at a time out of its HDF5 dataset.
+
+**The file's layout is the transpose of Julia's.** A NISAR image is stored row-major with azimuth (or
+northing) slowest, so `HDF5.jl` reports it as `(range, azimuth)`; this reverses that, so indexing is
+`(line, sample)` for a radar-geometry product and `(northing, easting)` for a geocoded one — the order
+every other array in this package uses.
+
+Nothing is held: an RSLC band is 50511 x 57760 `ComplexF32` and a GSLC band 161280 x 80640, which are
+23 GB and 104 GB of samples against files of 11 GiB and 10 GiB. Index with ranges, so that a window is
+one hyperslab read rather than one read per element.
+"""
+struct NisarRaster{T} <: AbstractMatrix{T}
+    path::String
+    dataset::String
+    dims::Tuple{Int,Int}
+end
+
+# **HDF5 is not thread-safe unless the library was built for it, and the shipped one is not.** Two tasks
+# reading one file segfault inside the C library rather than racing visibly. A read is milliseconds, so
+# serializing them costs far less than the work a caller does per window.
+const HDF5_IO = ReentrantLock()
+
+"""
+    nisar_samples_path(b::NisarBackend) -> String
+
+Where `b`'s polarization's samples live: under `swaths` for a radar-geometry product, `grids` for a
+geocoded one.
+
+The polarization is the first this frequency lists, which is the only one a single-polarization product
+carries and the co-polarized channel of a dual one.
+"""
+function nisar_samples_path(b::NisarBackend, polarization = nothing)
+    group = b.product_type in GEOCODED_TYPES ? "grids" : "swaths"
+    base = string(product_path(b), "/", group, "/frequency", b.frequency)
+    pol = polarization === nothing ? nothing : String(polarization)
+    return h5open(b.path, "r") do h
+        g = _group(h, base)
+        if pol === nothing
+            haskey(g, "listOfPolarizations") || throw(ArgumentError(
+                "`$(b.path)` lists no polarizations under $base"))
+            pol = String(first(read(g["listOfPolarizations"])))
+        end
+        haskey(g, pol) || throw(ArgumentError(
+            "`$(b.path)` has no $pol under $base; it lists " *
+            join(String.(read(g["listOfPolarizations"])), ", ")))
+        return string(base, "/", pol)
+    end
+end
+
+function NisarRaster(b::NisarBackend, polarization = nothing)
+    ds = nisar_samples_path(b, polarization)
+    T, nx, ny = h5open(b.path, "r") do h
+        d = h[ds]
+        (eltype(d), size(d, 1), size(d, 2))
+    end
+    return NisarRaster{T}(b.path, ds, (ny, nx))
+end
+
+Base.size(r::NisarRaster) = r.dims
+
+function Base.getindex(r::NisarRaster{T}, rows::AbstractUnitRange{<:Integer},
+                       cols::AbstractUnitRange{<:Integer}) where {T}
+    @boundscheck checkbounds(r, rows, cols)
+    return @lock HDF5_IO h5open(h -> permutedims(h[r.dataset][cols, rows]), r.path, "r")
+end
+
+Base.getindex(r::NisarRaster, i::Int, j::Int) = r[i:i, j:j][1, 1]
+Base.getindex(r::NisarRaster, rows::AbstractUnitRange{<:Integer}, j::Int) = r[rows, j:j][:, 1]
+Base.getindex(r::NisarRaster, i::Int, cols::AbstractUnitRange{<:Integer}) = r[i:i, cols][1, :]
+
+read_pixels(b::NisarBackend) = NisarRaster(b)
+
+# ---------------------------------------------------------------------------
+# Geocoded products
+# ---------------------------------------------------------------------------
+
+"""
+    GeocodedGrid
+
+The map grid a geocoded product's samples lie on: `origin` at the outer corner of the first pixel,
+signed `spacing`, `size` as `(rows, columns)`, and the EPSG code of the projection.
+
+**`origin` is the corner, not the first pixel's center.** The product stores `xCoordinates` and
+`yCoordinates` as centers; a geotransform names the corner, and a consumer intersecting two grids or
+handing one to GDAL wants the latter.
+"""
+struct GeocodedGrid
+    origin::Tuple{Float64,Float64}
+    spacing::Tuple{Float64,Float64}
+    size::Tuple{Int,Int}
+    epsg::Int
+end
+
+"""
+    GeocodedProduct <: AbstractSLC
+
+A geocoded NISAR product: its identification, the map grid its samples lie on, and the samples.
+
+Separate from [`SLC`](@ref) because it has no slant-range geometry to describe — `read_geometry` refuses
+one — while still carrying an acquisition's identification and samples. [`pixels`](@ref) reads it.
+"""
+struct GeocodedProduct{B<:AbstractSLCBackend} <: AbstractSLC
+    backend::B
+    identification::Identification
+    grid::GeocodedGrid
+end
+
+"""
+    geocoded_grid(b::NisarBackend) -> GeocodedGrid
+
+The map grid of a geocoded product's frequency group.
+"""
+function geocoded_grid(b::NisarBackend)
+    b.product_type in GEOCODED_TYPES || throw(ArgumentError(
+        "`$(b.path)` is a $(b.product_type) product, which lies in radar geometry and so has no map " *
+        "grid; `read_geometry` describes it instead"))
+    base = string(product_path(b), "/grids/frequency", b.frequency)
+    return h5open(b.path, "r") do h
+        g = _group(h, base)
+        x = read(_dataset(g, "xCoordinates"))
+        y = read(_dataset(g, "yCoordinates"))
+        dx = _scalar(g, "xCoordinateSpacing")
+        dy = _scalar(g, "yCoordinateSpacing")
+        return GeocodedGrid((first(x) - dx / 2, first(y) - dy / 2), (dx, dy),
+                            (length(y), length(x)), _scalar_int(g, "projection"))
+    end
+end
+
+"""
+    open_geocoded(path; frequency = nothing) -> GeocodedProduct
+
+Open a geocoded NISAR product — a GSLC, GCOV, GUNW or GOFF.
+
+[`open_slc`](@ref) refuses these: they carry no slant-range axis, so there is no `RadarGeometry` to read.
+What they do carry is a map grid and samples, which is what this returns.
+"""
+function open_geocoded(path::AbstractString; frequency = nothing)
+    ispath(path) || throw(ArgumentError("`$path` is not a readable file"))
+    ishdf5(path) || throw(ArgumentError("`$path` is not an HDF5 file"))
+    return h5open(path, "r") do h
+        band = nisar_band(h)
+        product_type = nisar_product_type(h, band)
+        product_type in GEOCODED_TYPES || throw(ArgumentError(
+            "`$path` is a $product_type product, which lies in radar geometry; use `open_slc`"))
+        freq = frequency === nothing ? default_frequency(h, band) : String(frequency)
+        b = NisarBackend(path, band, product_type, freq)
+        return GeocodedProduct(b, read_identification(b, h), geocoded_grid(b))
+    end
+end
+
+grid(g::GeocodedProduct) = g.grid
+nlines(g::GeocodedProduct) = g.grid.size[1]
+nsamples(g::GeocodedProduct) = g.grid.size[2]
