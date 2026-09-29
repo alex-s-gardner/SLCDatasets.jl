@@ -1,5 +1,6 @@
 using SLCDatasets
 using Test
+import DiskArrays
 
 include("fixture.jl")
 include("sentinel1_fixture.jl")

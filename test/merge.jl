@@ -14,6 +14,7 @@
 
 using SLCDatasets
 using SLCDatasets: MergedBurstBackend, ConcatenatedBursts, BurstValidMask, Amplitude,
+           BurstGrid, BurstPlacement,
                    read_annotation, annotation_xml, burst_grid, measurement_path, open_tiff,
                    Sentinel1Product, UtcTime, seconds_between, valid_lines, valid_samples,
                    MAX_BURST_GRID_RESIDUAL, grid, safe_polarizations
@@ -337,4 +338,53 @@ end
     # A real array is its own magnitude.
     @test amplitude(Float32[-1 2; 3 -4])[1, 1] == 1.0f0
     @test parent(amplitude(px)) === px
+end
+
+@testset "a concatenation is a DiskArrays array" begin
+    # A synthetic subswath shaped like a real one: `burst_grid` trims each placement to its valid lines, so
+    # the placements are disjoint and consecutive. Three bursts of 10 file lines contribute 6 rows each,
+    # starting at row 3 — so rows 1:2 are imaged by nothing and read as zero, and the bands are 1:2, 3:8,
+    # 9:14, 15:20. Samples 1:4 are imaged, so sample 5 reads as zero everywhere.
+    L, N = 10, 5
+    raster = Complex{Int16}[Complex{Int16}(100i + j, -j) for i in 1:(3L), j in 1:N]
+    places = [BurstPlacement(k, (3 + 6 * (k - 1)):(8 + 6 * (k - 1)), 2:7, 1:4) for k in 1:3]
+    g = BurstGrid(20, N, places, 0.0)
+    A = ConcatenatedBursts(raster, g, [(k - 1) * L for k in 1:3])
+
+    @test A isa DiskArrays.AbstractDiskArray
+    # **The chunks are the rows each burst serves**, with the unimaged leading rows as a band of their own so
+    # that the grid tiles the array — which is what a chunk grid has to do.
+    @test DiskArrays.haschunks(A) isa DiskArrays.Chunked
+    cs = DiskArrays.eachchunk(A)
+    @test map(first, vec(collect(cs))) == [1:2, 3:8, 9:14, 15:20]
+    @test all(c -> length(c[2]) == N, cs)
+    @test sum(c -> length(c[1]), cs) == size(A, 1)
+
+    whole = A[:, :]
+    @test size(whole) == (20, N)
+    @test all(iszero, whole[:, 5])                    # no burst images this sample
+    @test all(iszero, whole[1:2, :])                  # no burst images these rows
+    # Row 3 is burst 1's file row 2, which is where its placement starts.
+    @test whole[3, 1] == raster[2, 1]
+    # Row 9 is burst 2's file row 2, at that burst's offset of L into the stacked raster.
+    @test whole[9, 1] == raster[L + 2, 1]
+
+    # Scalar and window reads agree everywhere, including at every band boundary.
+    @test all(A[i, j] === whole[i, j] for i in axes(whole, 1), j in axes(whole, 2))
+
+    # Every form `DiskArrays` builds on `readblock!`, against the window read it is built from.
+    @test A[3:9, 2:4] == whole[3:9, 2:4]
+    @test A[1:2:19, 1:2:5] == whole[1:2:19, 1:2:5]
+    @test A[CartesianIndex(4, 3)] === whole[4, 3]
+    @test view(A, 5:8, 1:3)[:, :] == whole[5:8, 1:3]
+    @test A[12, :] == whole[12, :]
+    @test A[:, 2] == whole[:, 2]
+    @test_throws BoundsError A[1:21, 1:5]
+
+    # `readblock!` into a view: the destination's axes are not one-based and the seam arithmetic has to
+    # respect them.
+    dest = fill(Complex{Int16}(0, 0), 9, 9)
+    DiskArrays.readblock!(A, view(dest, 2:8, 3:5), 3:9, 2:4)
+    @test dest[2:8, 3:5] == whole[3:9, 2:4]
+    @test all(iszero, dest[1, :])
 end
