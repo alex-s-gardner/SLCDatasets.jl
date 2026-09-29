@@ -253,7 +253,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    NisarRaster{T} <: AbstractMatrix{T}
+    NisarRaster{T} <: DiskArrays.AbstractDiskArray{T,2}
 
 A NISAR product's sample array, read a window at a time out of its HDF5 dataset.
 
@@ -265,8 +265,25 @@ every other array in this package uses.
 Nothing is held: an RSLC band is 50511 x 57760 `ComplexF32` and a GSLC band 161280 x 80640, which are
 23 GB and 104 GB of samples against files of 11 GiB and 10 GiB. Index with ranges, so that a window is
 one hyperslab read rather than one read per element.
+
+**A `DiskArrays` array, so the chunk grid is part of the interface.** Scalar and strided indexing, views and
+broadcasting all come from `DiskArrays`; the only read method this defines is `readblock!`.
+
+`eachchunk` reports the dataset's own storage chunks, which is what lets a caller align its windows to them.
+A filtered chunk is decoded whole however little of it is wanted, so a window that straddles boundaries pays
+for chunks it barely touches — on a GSLC band's 512 x 512 chunks, holding the sample count fixed and moving
+only the offset:
+
+    window   chunks decoded          wall clock
+             aligned   straddling    aligned   straddling
+    1024²    4         9             0.0080 s  0.0108 s
+    2048²    16        25            0.0193 s  0.0282 s
+    4096²    64        81            0.0693 s  0.0835 s
+
+So alignment is worth 1.2x to 1.5x, most at the block sizes closest to the chunk. Sweeping a 4096² region in
+four 2048² blocks costs 64 chunk decodes aligned against 100 straddling, and 0.055 s against 0.081 s.
 """
-struct NisarRaster{T} <: AbstractMatrix{T}
+struct NisarRaster{T} <: DiskArrays.AbstractDiskArray{T,2}
     path::String
     dataset::String
     dims::Tuple{Int,Int}
@@ -332,25 +349,58 @@ end
 
 Base.size(r::NisarRaster) = r.dims
 
-function Base.getindex(r::NisarRaster{T}, rows::AbstractUnitRange{<:Integer},
-                       cols::AbstractUnitRange{<:Integer}) where {T}
-    @boundscheck checkbounds(r, rows, cols)
+"""
+    DiskArrays.readblock!(r::NisarRaster, dest, rows, cols)
+
+Fill `dest` with `r[rows, cols]`.
+
+The only read method this type defines: `DiskArrays` builds `getindex` for scalars, strided and arbitrary
+indices, views and broadcasting on top of it, and batches a request that spans chunks.
+
+A chunked dataset takes [`_read_by_chunks!`](@ref), which decodes outside the thread-safety lock. An
+unchunked one goes through `H5Dread`, where there is no filter to run and so nothing to move off the lock.
+"""
+function DiskArrays.readblock!(r::NisarRaster{T}, dest::AbstractArray{T,2},
+                               rows::AbstractUnitRange{<:Integer},
+                               cols::AbstractUnitRange{<:Integer}) where {T}
+    size(dest) == (length(rows), length(cols)) || throw(DimensionMismatch(
+        "a $(size(dest)) destination cannot hold a $(length(rows)) x $(length(cols)) window"))
     plan = _chunk_plan(r)
-    isnothing(plan) || return _read_by_chunks!(similar(Matrix{T}, length(rows), length(cols)),
-                                               r, plan, rows, cols)
+    isnothing(plan) || return _read_by_chunks!(dest, r, plan, rows, cols)
 
     # The hyperslab under the lock, the transpose outside it: `permutedims` of a window is a third of the
     # cost and needs no library call, so holding `HDF5_IO` across it would serialize concurrent readers on
     # work that has nothing to serialize.
     #
-    # **`::Matrix{T}` because `HDF5.Dataset`'s `getindex` is not inferrable**, and this method's return type
-    # is what every consumer's loop is compiled against: without the annotation `Amplitude`'s window read
-    # dispatches `_magnitude` once per sample, which measures 158 ns an element against 12 ns — a 2048²
+    # **`::Matrix{T}` because `HDF5.Dataset`'s `getindex` is not inferrable.** Without the annotation the
+    # `Any` propagates into the copy below and into anything compiled against this method's effects; the same
+    # instability measured 158 ns an element against 12 in `Amplitude`'s conversion loop, which is a 2048²
     # window of a GSLC costing 0.71 s instead of 0.05 s. `T` is the dataset's own `eltype`, read when the
     # raster was constructed, so the assertion is the file's own type and not a coercion.
     raw::Matrix{T} = @lock HDF5_IO h5open(h -> h[r.dataset][cols, rows], r.path, "r")
-    return permutedims(raw)
+    copyto!(dest, permutedims(raw))
+    return dest
 end
+
+"""
+    DiskArrays.eachchunk(r::NisarRaster)
+
+`r`'s storage chunks, in `r`'s own `(line, sample)` order.
+
+**Reversed from what the creation property list reports**, which counts in the file's `(sample, line)`
+order — the same transposition `NisarRaster` itself applies to the dimensions.
+
+An unchunked dataset reports one chunk covering the array, which is what `DiskArrays` expects of a source
+whose reads have no natural granularity.
+"""
+function DiskArrays.eachchunk(r::NisarRaster)
+    plan = _chunk_plan(r)
+    isnothing(plan) && return DiskArrays.GridChunks(r, size(r))
+    return DiskArrays.GridChunks(r, reverse(plan.chunk))
+end
+
+DiskArrays.haschunks(r::NisarRaster) =
+    isnothing(_chunk_plan(r)) ? DiskArrays.Unchunked() : DiskArrays.Chunked()
 
 # ---------------------------------------------------------------------------
 # Reading a window chunk by chunk
@@ -445,7 +495,7 @@ Measured on a NISAR GSLC band, ten overlapping 2048² amplitude windows on ten t
 0.126 s here, with concurrency now worth 1.60x rather than 0.66x. One window alone went from 0.707 s to
 0.029 s, the larger part of that from making this method's return type inferrable.
 """
-function _read_by_chunks!(out::Matrix{T}, r::NisarRaster{T}, plan::ChunkPlan{T},
+function _read_by_chunks!(out::AbstractMatrix{T}, r::NisarRaster{T}, plan::ChunkPlan{T},
                           rows::AbstractUnitRange{<:Integer},
                           cols::AbstractUnitRange{<:Integer}) where {T}
     cs, cl = plan.chunk                  # file order: samples, then lines
@@ -538,7 +588,7 @@ _scratch_bytes(plan::ChunkPlan) = plan.bytes + plan.bytes ÷ 8 + 1024
 
 # One decoded chunk's contribution to `out`, which is indexed `(line, sample)` where the chunk's bytes are
 # `(sample, line)` — so this is a transposing copy of the rectangle the two have in common.
-function _place_chunk!(out::Matrix{T}, plan::ChunkPlan{T}, job::Tuple{Int,Int},
+function _place_chunk!(out::AbstractMatrix{T}, plan::ChunkPlan{T}, job::Tuple{Int,Int},
                        raw::AbstractVector{UInt8}, mask::UInt32,
                        infl::Vector{UInt8}, plain::Vector{UInt8},
                        rows::AbstractUnitRange{<:Integer},
@@ -550,8 +600,9 @@ function _place_chunk!(out::Matrix{T}, plan::ChunkPlan{T}, job::Tuple{Int,Int},
     (isempty(srows) || isempty(scols)) && return out
 
     if isempty(raw)
+        i0, j0 = first(axes(out, 1)), first(axes(out, 2))
         for s in scols, l in srows
-            out[l - first(rows) + 1, s - first(cols) + 1] = plan.fill
+            out[i0 + (l - first(rows)), j0 + (s - first(cols))] = plan.fill
         end
         return out
     end
@@ -575,11 +626,14 @@ function _place_chunk!(out::Matrix{T}, plan::ChunkPlan{T}, job::Tuple{Int,Int},
 
     got = reshape(reinterpret(T, view(plain, 1:plan.bytes)), cs, cl)
     # `out` is contiguous down its first axis, so the destination is walked in order and `got` strided.
+    # Offsets are taken from `out`'s own axes rather than assumed to be one-based: `DiskArrays` hands
+    # `readblock!` whatever array the caller is filling, which for a view is not.
+    i0, j0 = first(axes(out, 1)), first(axes(out, 2))
     for s in scols
-        j = s - first(cols) + 1
+        j = j0 + (s - first(cols))
         gs = s - (is - 1) * cs
         for l in srows
-            out[l - first(rows) + 1, j] = got[gs, l - (il - 1) * cl]
+            out[i0 + (l - first(rows)), j] = got[gs, l - (il - 1) * cl]
         end
     end
     return out
@@ -616,9 +670,8 @@ function _unshuffle!(dst::Vector{UInt8}, src::Vector{UInt8}, elsize::Integer, n:
     return dst
 end
 
-Base.getindex(r::NisarRaster, i::Int, j::Int) = r[i:i, j:j][1, 1]
-Base.getindex(r::NisarRaster, rows::AbstractUnitRange{<:Integer}, j::Int) = r[rows, j:j][:, 1]
-Base.getindex(r::NisarRaster, i::Int, cols::AbstractUnitRange{<:Integer}) = r[i:i, cols][1, :]
+# Every other indexing form — scalar, strided, `Colon`, `CartesianIndex`, a view — comes from `DiskArrays`
+# on top of `readblock!`, including the bounds checks and the batching of a request that spans chunks.
 
 read_pixels(b::NisarBackend) = NisarRaster(b)
 

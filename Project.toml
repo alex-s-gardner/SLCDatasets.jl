@@ -5,6 +5,7 @@ authors = ["Alex S. Gardner, JPL/NASA"]
 
 [deps]
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+DiskArrays = "3c3547ce-8d99-4f5e-a174-61eb10b00ae3"
 EzXML = "8f5d6c58-4d21-5cfd-889c-e3ad7ee6a615"
 HDF5 = "f67ccb44-e63f-5c2f-98bd-6dc0ccc4ba2f"
 Mmap = "a63ad114-7e13-5084-954f-fe012c677804"
@@ -14,6 +15,7 @@ ZipArchives = "49080126-0e18-4c2a-b176-c102e4b3760c"
 
 [compat]
 Dates = "1"
+DiskArrays = "0.4"
 EzXML = "1"
 HDF5 = "0.17"
 Mmap = "1"

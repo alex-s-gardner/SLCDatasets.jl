@@ -303,6 +303,60 @@ end
     end
 end
 
+@testset "the chunk grid is part of the interface" begin
+    # `eachchunk` is what lets a caller align its windows to storage. Its order is the raster's, which is the
+    # reverse of what the creation property list reports — the same transposition `NisarRaster` applies to
+    # the dimensions, and a place a wrong answer would be invisible on a square chunk.
+    A = ComplexF32[complex(i, -j) for i in 1:37, j in 1:23]
+    mktempdir() do dir
+        chunked = write_fixture_product(joinpath(dir, "chunked.h5"); samples = A, chunk = (5, 8))
+        plain = write_fixture_product(joinpath(dir, "plain.h5"); samples = A)
+
+        p = pixels(open_slc(chunked))
+        @test p isa DiskArrays.AbstractDiskArray
+        @test DiskArrays.haschunks(p) === DiskArrays.Chunked()
+        cs = DiskArrays.eachchunk(p)
+        # 8 lines by 5 samples: the file stores `(sample, line)` chunks of `(5, 8)`.
+        @test map(length, first(cs)) == (8, 5)
+        @test size(cs) == (cld(37, 8), cld(23, 5))
+        @test sum(c -> prod(map(length, c)), cs) == length(A)
+        # The chunks tile the array exactly, which is the property a caller aligning to them relies on.
+        covered = falses(size(A))
+        for c in cs
+            covered[c...] .= true
+        end
+        @test all(covered)
+
+        # **An unaligned window decodes more chunks than an aligned one**, which is the cost `eachchunk`
+        # exists to let a caller avoid. Counted as chunks touched, since a chunk is decoded whole.
+        touched(rows, ccols) = count(c -> !isempty(intersect(rows, c[1])) &&
+                                          !isempty(intersect(ccols, c[2])), collect(cs))
+        @test touched(1:16, 1:10) == 4            # two chunk rows by two chunk columns, on the boundary
+        @test touched(5:20, 3:12) == 9            # the same extent, straddling both axes
+
+        q = pixels(open_slc(plain))
+        @test DiskArrays.haschunks(q) === DiskArrays.Unchunked()
+        @test size(DiskArrays.eachchunk(q)) == (1, 1)
+
+        # Indexing forms `DiskArrays` provides on top of `readblock!`, none of them defined here.
+        for r in (p, q)
+            @test r[7, 3] === A[7, 3]
+            @test r[1:2:9, 2:3:20] == A[1:2:9, 2:3:20]
+            @test r[CartesianIndex(4, 5)] === A[4, 5]
+            @test view(r, 3:6, 2:4)[:, :] == A[3:6, 2:4]
+            @test r[:, 4] == A[:, 4]
+            @test_throws BoundsError r[1:38, 1:23]
+        end
+
+        # `readblock!` into a view, because that is what `DiskArrays` hands it when batching a request: the
+        # destination's axes are not one-based and the decoder has to respect them.
+        dest = fill(ComplexF32(0), 10, 10)
+        DiskArrays.readblock!(p, view(dest, 3:6, 2:4), 5:8, 11:13)
+        @test dest[3:6, 2:4] == A[5:8, 11:13]
+        @test all(iszero, dest[1:2, :])
+    end
+end
+
 @testset "an unwritten chunk reads as the fill value" begin
     # **The state a real GSLC is in outside its imaged swath.** A chunked dataset allocates a chunk on first
     # write, so a region never written has no stored bytes and the library substitutes the fill value —

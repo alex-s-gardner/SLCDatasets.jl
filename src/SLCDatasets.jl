@@ -36,6 +36,7 @@ addressable without inflating everything before it.
 module SLCDatasets
 
 import Dates
+import DiskArrays
 import HDF5
 using Dates: DateTime
 import EzXML
