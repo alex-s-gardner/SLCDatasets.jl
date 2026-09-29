@@ -1,4 +1,5 @@
 using SLCDatasets: open_tiff, StripedTiff
+import DiskArrays
 
 @testset "reads a striped raster" begin
     mktempdir() do dir
@@ -115,5 +116,39 @@ if haskey(ENV, "SLCDATASETS_S1_TIFF")
         # Window and scalar reads agree deep inside a multi-gigabyte file.
         i, j = size(t, 1) ÷ 2, size(t, 2) ÷ 2
         @test t[i:(i + 3), j:(j + 4)] == [t[a, b] for a in i:(i + 3), b in j:(j + 4)]
+    end
+end
+
+@testset "the raster is a DiskArrays array" begin
+    pixels = tiff_pattern(37, 23)
+    mktempdir() do dir
+        t = open_tiff(write_tiff(joinpath(dir, "da.tiff"), pixels))
+        @test t isa DiskArrays.AbstractDiskArray
+
+        # The strips are the file's granularity and are reported as such: one line each.
+        @test DiskArrays.haschunks(t) isa DiskArrays.Chunked
+        @test map(length, first(DiskArrays.eachchunk(t))) == (1, 23)
+        @test size(DiskArrays.eachchunk(t)) == (37, 1)
+
+        # Everything `DiskArrays` builds on `readblock!`, none of it written here.
+        @test t[:, :] == pixels
+        @test t[5:9, 3:7] == pixels[5:9, 3:7]
+        @test t[1:2:20, 2:3:20] == pixels[1:2:20, 2:3:20]
+        @test t[CartesianIndex(6, 4)] === pixels[6, 4]
+        @test view(t, 3:6, 2:4)[:, :] == pixels[3:6, 2:4]
+        @test t[11, :] == pixels[11, :]
+        @test t[:, 12] == pixels[:, 12]
+        @test_throws BoundsError t[1:38, 1:23]
+
+        # The scalar method is kept rather than left to `DiskArrays`, which would route one element through
+        # `readblock!`: on a real subswath that is the difference between 4.9 ns an element and a window read.
+        @test t[6, 4] === pixels[6, 4]
+        @test @inferred(t[6, 4]) isa Complex{Int16}
+
+        # `readblock!` into a view, which is what `DiskArrays` hands it when batching.
+        dest = fill(Complex{Int16}(0, 0), 8, 8)
+        DiskArrays.readblock!(t, view(dest, 2:5, 3:5), 10:13, 7:9)
+        @test dest[2:5, 3:5] == pixels[10:13, 7:9]
+        @test all(iszero, dest[1, :])
     end
 end
