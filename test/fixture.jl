@@ -34,6 +34,49 @@ function _hex_literal(v::Float64)
     return string(sign, "0x1.", digits, "p", exponent >= 0 ? "+" : "-", abs(exponent))
 end
 
+# One sample array, in the file's `(sample, line)` layout — optionally chunked and filtered, which is how a
+# real product stores its samples and the only way to reach the chunk-at-a-time read path. `chunk` is given
+# in that same file order, as `HDF5.jl` reports it.
+function _write_samples(h, name::AbstractString, samples::AbstractMatrix, chunk, filters;
+                       fill = nothing, written = nothing)
+    A = permutedims(samples)
+    if chunk === nothing
+        h[name] = A
+        return nothing
+    end
+    if fill !== nothing || written !== nothing
+        # **A dataset only partly written, so some chunks are never allocated.** That is the state a real
+        # GSLC is in outside its imaged swath, and those chunks read as the fill value rather than as
+        # samples — which a reader that assumes zero gets wrong without erroring.
+        ch = Tuple(Int.(chunk))
+        kw = (; chunk = ch,
+              (:shuffle in filters ? (; shuffle = true) : (;))...,
+              (:deflate in filters ? (; deflate = 1) : (;))...,
+              (fill === nothing ? (;) : (; fill_value = fill))...)
+        d = create_dataset(h, name, eltype(A), size(A); kw...)
+        rows, cols = something(written, (axes(samples, 1), axes(samples, 2)))
+        # `written` names the part of the *raster* to write, so it transposes into the file's order.
+        d[cols, rows] = A[cols, rows]
+        return nothing
+    end
+    # **Spelled out rather than built as a keyword collection, because the order is the point.** The
+    # creation property list records the order the filters were applied in and a reader has to undo them in
+    # reverse, so a `Dict` splat — whose iteration order is unspecified — writes a chain that is not the one
+    # a real product has. Shuffle then deflate is the NISAR order.
+    ch = Tuple(Int.(chunk))
+    sh, df = :shuffle in filters, :deflate in filters
+    if sh && df
+        h[name, chunk = ch, shuffle = true, deflate = 1] = A
+    elseif sh
+        h[name, chunk = ch, shuffle = true] = A
+    elseif df
+        h[name, chunk = ch, deflate = 1] = A
+    else
+        h[name, chunk = ch] = A
+    end
+    return nothing
+end
+
 """
     override(fx, path => value, ...) -> NamedTuple
 
@@ -65,7 +108,8 @@ Write `fx` as a NISAR-layout HDF5 product at `path`.
 Only the datasets the reader reads are written, with the group names and the `units` attributes a real
 product carries.
 """
-function write_fixture_product(path::AbstractString, fx = FIXTURE; samples = nothing)
+function write_fixture_product(path::AbstractString, fx = FIXTURE; samples = nothing,
+                               chunk = nothing, filters = (:shuffle, :deflate))
     band, product, freq = fx.band, fx.product_type, fx.frequency
     id, geom, orb = fx.identification, fx.geometry, fx.orbit
 
@@ -115,7 +159,12 @@ function write_fixture_product(path::AbstractString, fx = FIXTURE; samples = not
         # The samples, written in the file's own layout: azimuth slowest, so the dataset is the
         # transpose of the `(line, sample)` array a reader hands back. Small, because what is under test
         # is the read and the transpose rather than a product's real extent.
-        samples === nothing || (h["$p/swaths/frequency$freq/HH"] = permutedims(samples))
+        #
+        # `chunk` and `filters` write the dataset the way a real product is written — chunked, shuffled
+        # and deflated — which is the only way to reach the chunk-at-a-time read path. Given in the
+        # file's `(sample, line)` order, as `HDF5.jl` reports a chunk.
+        samples === nothing ||
+            _write_samples(h, "$p/swaths/frequency$freq/HH", samples, chunk, filters)
     end
     return path
 end
@@ -129,6 +178,8 @@ A minimal geocoded NISAR product: a `grids` group with its coordinate axes and a
 by half a pixel to the corner.
 """
 function write_fixture_geocoded(path::AbstractString; samples::AbstractMatrix,
+                                chunk = nothing, filters = (:shuffle, :deflate),
+                                fill = nothing, written = nothing,
                                 origin::Tuple{Real,Real} = (-340558.75, -2.1067225e6),
                                 spacing::Tuple{Real,Real} = (2.5, -5.0), epsg::Integer = 3413)
     ny, nx = size(samples)
@@ -151,7 +202,7 @@ function write_fixture_geocoded(path::AbstractString; samples::AbstractMatrix,
         h["$g/yCoordinateSpacing"] = Float64(spacing[2])
         h["$g/projection"] = UInt32(epsg)
         h["$g/listOfPolarizations"] = ["HH"]
-        h["$g/HH"] = permutedims(samples)
+        _write_samples(h, "$g/HH", samples, chunk, filters; fill, written)
     end
     return path
 end

@@ -243,6 +243,87 @@ end
 
         @test amplitude(s) == abs.(A)
         @test_throws BoundsError p[1:8, 1:5]
+
+        # **A window read must be inferrable, because a consumer's loop is compiled against its type.**
+        # `HDF5.Dataset`'s own `getindex` is not, and an unannotated return propagated that all the way
+        # into `Amplitude`, whose per-sample conversion then dispatched at run time: 158 ns an element
+        # against 12, or 0.71 s against 0.05 for one 2048² window of a GSLC.
+        @test @inferred(p[2:5, 2:3]) isa Matrix{ComplexF32}
+        @test @inferred(amplitude(p)[2:5, 2:3]) isa Matrix{Float32}
+
+        # **Concurrent windows, because a blocked caller reads from every thread it has.** The library is
+        # not thread-safe and one handle per file is kept open across reads, so the serialization has to be
+        # the lock's; unsynchronized access segfaults inside HDF5 rather than returning a wrong answer.
+        # Overlapping windows, so the same chunks are in flight at once.
+        rows = [i:min(i + 3, 7) for i in 1:4]
+        @test fetch.([Threads.@spawn p[r, 1:5] for r in rows]) == [A[r, 1:5] for r in rows]
+    end
+end
+
+@testset "a chunked, filtered dataset reads chunk by chunk" begin
+    # 37 x 23 in 8 x 5 chunks: neither extent is a multiple of its chunk, the two chunk extents differ, and
+    # the array is not square — so a transposed index, an offset given in the wrong dimension order, or a
+    # partial edge chunk handled as though it were stored short all show up as a wrong value rather than as
+    # a shape error. Every element is distinguishable.
+    A = ComplexF32[complex(i, -j) for i in 1:37, j in 1:23]
+    chunk = (5, 8)                      # file order: (sample, line), the transpose of Julia's
+    mktempdir() do dir
+        # The same samples written three ways: the real product's filter chain, each filter alone, and
+        # unchunked — the last taking the `H5Dread` fallback, which must agree with the other three.
+        arms = [("shuffle+deflate", (:shuffle, :deflate), chunk),
+                ("deflate", (:deflate,), chunk),
+                ("shuffle", (:shuffle,), chunk),
+                ("no filter", (), chunk),
+                ("unchunked", (), nothing)]
+        for (label, filters, ch) in arms
+            path = write_fixture_product(joinpath(dir, "chunked_$(hash(label)).h5");
+                                         samples = A, chunk = ch, filters)
+            p = pixels(open_slc(path))
+            @testset "$label" begin
+                @test size(p) == (37, 23)
+                @test p[:, :] == A
+                # Windows that each stress one thing: wholly inside a chunk, straddling one boundary on
+                # each axis, straddling several, reaching the partial last chunk on both axes, and the
+                # single element.
+                for (rows, cols) in ((2:6, 2:5), (7:10, 4:7), (6:20, 3:18), (30:37, 17:23),
+                                     (1:37, 23:23), (37:37, 1:23), (12:12, 12:12), (1:8, 1:5))
+                    @test p[rows, cols] == A[rows, cols]
+                end
+                @test @inferred(p[6:20, 3:18]) isa Matrix{ComplexF32}
+                @test amplitude(p)[6:20, 3:18] == abs.(A[6:20, 3:18])
+
+                # **Concurrent overlapping windows**, because the whole point of decoding outside the
+                # library's lock is that several tasks decode at once — and they share chunks, so a scratch
+                # buffer leaking between tasks would corrupt one of them.
+                wins = [(i:(i + 11), 2:20) for i in 1:5]
+                @test fetch.([Threads.@spawn p[r, c] for (r, c) in wins]) ==
+                      [A[r, c] for (r, c) in wins]
+            end
+        end
+    end
+end
+
+@testset "an unwritten chunk reads as the fill value" begin
+    # **The state a real GSLC is in outside its imaged swath.** A chunked dataset allocates a chunk on first
+    # write, so a region never written has no stored bytes and the library substitutes the fill value —
+    # `NaN + NaN*im` on a NISAR GSLC. A reader that returns zero there reports a gap as valid black, which
+    # no shape or type check catches.
+    A = ComplexF32[complex(i, -j) for i in 1:40, j in 1:24]
+    nan = ComplexF32(NaN32, NaN32)
+    mktempdir() do dir
+        path = write_fixture_geocoded(joinpath(dir, "sparse.h5"); samples = A, chunk = (8, 8),
+                                      fill = nan, written = (1:16, 1:8))
+        p = pixels(open_geocoded(path))
+        @test p[1:16, 1:8] == A[1:16, 1:8]
+        # Wholly outside the written region, so every chunk it touches is unallocated.
+        @test all(isnan, real(p[25:40, 17:24]))
+        # Straddling the boundary: written values on one side, fill on the other, in one window.
+        w = p[9:24, 1:16]
+        @test w[1:8, 1:8] == A[9:16, 1:8]
+        @test all(isnan, real(w[9:16, 9:16]))
+        # And the whole array agrees with what the library returns for it, fill and all.
+        lib = h5open(f -> permutedims(f["science/LSAR/GSLC/grids/frequencyA/HH"][:, :]), path, "r")
+        @test isequal(p[:, :], lib)
     end
 end
 

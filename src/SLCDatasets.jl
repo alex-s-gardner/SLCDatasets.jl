@@ -41,6 +41,7 @@ using Dates: DateTime
 import EzXML
 using EzXML: parsexml, readxml, root, findfirst, findall, nodecontent, nodename, eachelement
 using HDF5: h5open, ishdf5, read_attribute
+import Zlib_jll
 using Mmap: mmap
 using StaticArrays: SVector
 using ZipArchives: ZipReader, zip_name, zip_nentries, zip_readentry
