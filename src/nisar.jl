@@ -273,9 +273,26 @@ struct NisarRaster{T} <: AbstractMatrix{T}
 end
 
 # **HDF5 is not thread-safe unless the library was built for it, and the shipped one is not.** Two tasks
-# reading one file segfault inside the C library rather than racing visibly. A read is milliseconds, so
-# serializing them costs far less than the work a caller does per window.
+# calling into the C library segfault rather than racing visibly, so every call a caller can reach from more
+# than one task goes through this.
+#
+# It is therefore the ceiling on how much of a machine a blocked reader can use, and as little as possible
+# belongs inside it. `H5Dread` does not qualify: on a filtered dataset it inflates the chunks itself, which
+# is the bulk of a window read — hence [`_read_by_chunks!`](@ref), which keeps only the compressed byte read
+# under the lock.
 const HDF5_IO = ReentrantLock()
+
+# **A window read opens the file, and keeping the handle or the dataset open instead does not work.** A
+# `Dict` of live `HDF5.Dataset`s segfaults a blocked reader inside `H5CX_pop` under `H5Tget_member_name`:
+# each read derives a compound datatype from the shared dataset, and `HDF5.jl` finalizes those from
+# whichever thread runs the garbage collector, with no lock, while another thread is inside the library.
+# Opening and closing within the locked region keeps every library call on one thread at a time.
+#
+# **Raising the chunk cache does not help either.** A NISAR band is stored in 512 x 512 chunks — 2 MiB of
+# `ComplexF32`, shuffled and deflated — against a library default cache of 1 MiB, so no chunk is ever
+# retained and overlapping windows re-inflate; but `H5Pset_chunk_cache` at 1 GiB reads back as 1 MiB from
+# `H5Dget_access_plist` and leaves a re-read of ten overlapping 2048² windows at 1.45 s against 1.42 s. A
+# reader that needs chunk reuse has to hold the samples itself.
 
 """
     nisar_samples_path(b::NisarBackend) -> String
@@ -318,7 +335,285 @@ Base.size(r::NisarRaster) = r.dims
 function Base.getindex(r::NisarRaster{T}, rows::AbstractUnitRange{<:Integer},
                        cols::AbstractUnitRange{<:Integer}) where {T}
     @boundscheck checkbounds(r, rows, cols)
-    return @lock HDF5_IO h5open(h -> permutedims(h[r.dataset][cols, rows]), r.path, "r")
+    plan = _chunk_plan(r)
+    isnothing(plan) || return _read_by_chunks!(similar(Matrix{T}, length(rows), length(cols)),
+                                               r, plan, rows, cols)
+
+    # The hyperslab under the lock, the transpose outside it: `permutedims` of a window is a third of the
+    # cost and needs no library call, so holding `HDF5_IO` across it would serialize concurrent readers on
+    # work that has nothing to serialize.
+    #
+    # **`::Matrix{T}` because `HDF5.Dataset`'s `getindex` is not inferrable**, and this method's return type
+    # is what every consumer's loop is compiled against: without the annotation `Amplitude`'s window read
+    # dispatches `_magnitude` once per sample, which measures 158 ns an element against 12 ns — a 2048²
+    # window of a GSLC costing 0.71 s instead of 0.05 s. `T` is the dataset's own `eltype`, read when the
+    # raster was constructed, so the assertion is the file's own type and not a coercion.
+    raw::Matrix{T} = @lock HDF5_IO h5open(h -> h[r.dataset][cols, rows], r.path, "r")
+    return permutedims(raw)
+end
+
+# ---------------------------------------------------------------------------
+# Reading a window chunk by chunk
+# ---------------------------------------------------------------------------
+
+"""
+    ChunkPlan{T}
+
+How a dataset's samples are stored: the chunk shape, the value an unwritten chunk reads as, and the filters
+to undo in read order.
+
+`chunk` and `nchunks` are in the *file's* `HDF5.jl`-reported order — `(sample, line)` — because that is the
+order a chunk's bytes arrive in and the order the offsets are computed from.
+"""
+struct ChunkPlan{T}
+    chunk::Tuple{Int,Int}
+    nchunks::Tuple{Int,Int}
+    bytes::Int
+    # **The dataset's own fill value, not zero.** A chunked dataset allocates a chunk when it is first
+    # written, so a region never written has no bytes to read and reads as the fill value instead — which on
+    # a NISAR GSLC is `NaN + NaN*im` over everything outside the imaged swath. Assuming zero turns a gap
+    # into valid-looking black.
+    fill::T
+    # `(filter id, first client value)` in the order to *undo* them, which is the reverse of the order the
+    # creation property list lists and therefore of the order they were applied on write.
+    undo::Vector{Tuple{Int,Int}}
+end
+
+const H5Z_DEFLATE = 1
+const H5Z_SHUFFLE = 2
+
+# Resolved once per dataset, because it costs three library calls and never changes. `nothing` means the
+# chunked path does not apply: an unchunked dataset, or one carrying a filter with no decoder here — in
+# which case `H5Dread` is still correct, just serial.
+const CHUNK_PLANS = Dict{Tuple{String,String},Union{ChunkPlan,Nothing}}()
+const CHUNK_PLAN_LOCK = ReentrantLock()
+
+function _chunk_plan(r::NisarRaster{T}) where {T}
+    key = (r.path, r.dataset)
+    @lock CHUNK_PLAN_LOCK begin
+        haskey(CHUNK_PLANS, key) && return CHUNK_PLANS[key]
+        plan = @lock HDF5_IO h5open(h -> _chunk_plan(h[r.dataset], T), r.path, "r")
+        CHUNK_PLANS[key] = plan
+        return plan
+    end
+end
+
+function _chunk_plan(d::HDF5.Dataset, ::Type{T}) where {T}
+    dcpl = HDF5.get_create_properties(d)
+    # `dcpl.chunk` errors rather than returning `nothing` when there are no chunks, so the layout decides
+    # whether to ask.
+    dcpl.layout === :chunked || return nothing
+    chunk = Tuple(Int.(dcpl.chunk))
+    length(chunk) == 2 || return nothing
+    nf = Int(HDF5.API.h5p_get_nfilters(dcpl))
+    undo = Tuple{Int,Int}[]
+    for i in (nf - 1):-1:0
+        cd = Vector{Cuint}(undef, 8)
+        ne = Ref{Csize_t}(length(cd))
+        name = Vector{UInt8}(undef, 64)
+        flags = Ref{Cuint}()
+        config = Ref{Cuint}()
+        id = Int(HDF5.API.h5p_get_filter(dcpl, i, flags, ne, cd, length(name), name, config))
+        id in (H5Z_DEFLATE, H5Z_SHUFFLE) || return nothing
+        push!(undo, (id, ne[] > 0 ? Int(cd[1]) : 0))
+    end
+    # The value an unwritten chunk reads as. `H5Pget_fill_value` converts into whatever type it is handed,
+    # and `HDF5.datatype(d)` is the dataset's own — so a compound `ComplexF32` arrives as one.
+    fill = Ref{T}(zero(T))
+    HDF5.API.h5p_get_fill_value(dcpl, HDF5.datatype(d), fill)
+    return ChunkPlan{T}(chunk, Tuple(cld.(size(d), chunk)), prod(chunk) * sizeof(T), fill[], undo)
+end
+
+"""
+    _read_by_chunks!(out, r, plan, rows, cols) -> out
+
+`r[rows, cols]` read a chunk at a time, with the decompression outside `HDF5_IO`.
+
+**This is what lets a blocked reader use more than one core.** `H5Dread` runs the filter pipeline itself, so
+a window read that goes through it inflates inside the lock and every other task waits — measured at 2.6 of
+10 threads on a blocked correlation, with nine threads parked in `__psynch_cvwait` and one in
+`inflate_fast`. `H5Dread_chunk` instead hands back a chunk's stored bytes with no filter applied, so the
+serialized part is a byte read and the inflate is ordinary Julia work on any thread.
+
+**Buffers are pooled and the stored bytes land in one array**, because the allocation is otherwise what
+limits the concurrency this exists to deliver: a byte vector per chunk is 24 MiB per 2048² window and two
+scratch buffers per task another 48 MiB, and ten block reads in flight turn that into half a gigabyte of
+garbage per round.
+
+Measured on a NISAR GSLC band, ten overlapping 2048² amplitude windows on ten threads: 1.312 s through
+`H5Dread` — slower than reading them one at a time, which is what a contended lock looks like — against
+0.126 s here, with concurrency now worth 1.60x rather than 0.66x. One window alone went from 0.707 s to
+0.029 s, the larger part of that from making this method's return type inferrable.
+"""
+function _read_by_chunks!(out::Matrix{T}, r::NisarRaster{T}, plan::ChunkPlan{T},
+                          rows::AbstractUnitRange{<:Integer},
+                          cols::AbstractUnitRange{<:Integer}) where {T}
+    cs, cl = plan.chunk                  # file order: samples, then lines
+    # `(is, il)`: the chunk's index along samples and along lines. Flat, because the work is handed out by
+    # linear index and a two-dimensional comprehension would make `pairs` yield `CartesianIndex` keys.
+    jobs = vec([(is, il)
+                for is in (fld(first(cols) - 1, cs) + 1):(fld(last(cols) - 1, cs) + 1),
+                    il in (fld(first(rows) - 1, cl) + 1):(fld(last(rows) - 1, cl) + 1)])
+
+    # Every chunk's stored bytes end to end, with `span[k]` naming chunk `k`'s slice and its filter mask. An
+    # unallocated chunk gets an empty span, which is how the fill value is signalled.
+    slack = _scratch_bytes(plan)
+    bytes = _take_scratch(length(jobs) * slack)
+    span = Vector{UnitRange{Int}}(undef, length(jobs))
+    mask = Vector{UInt32}(undef, length(jobs))
+    try
+        # The locked region is the open, the chunk lookups and the byte reads — nothing else. One open for
+        # the whole window rather than one per chunk.
+        @lock HDF5_IO h5open(r.path, "r") do h
+            d = h[r.dataset]
+            pos = 1
+            m = Ref{UInt32}(0)
+            for (k, (is, il)) in pairs(jobs)
+                off = HDF5.API.hsize_t[(il - 1) * cl, (is - 1) * cs]
+                info = HDF5.API.h5d_get_chunk_info_by_coord(d, off)
+                if info.size == 0
+                    span[k] = pos:(pos - 1)          # empty: never written, so the fill value applies
+                    continue
+                end
+                n = Int(info.size)
+                # `h5d_read_chunk` writes from the start of whatever buffer it is given, so each chunk is
+                # read into its own slot with a view rather than into a shared front.
+                dest = view(bytes, pos:(pos + n - 1))
+                HDF5.API.h5d_read_chunk(d, HDF5.API.H5P_DEFAULT, off, m, dest)
+                mask[k] = m[]
+                span[k] = pos:(pos + n - 1)
+                pos += n
+            end
+        end
+
+        ntasks = max(1, min(Threads.nthreads(), length(jobs)))
+        @sync for t in 1:ntasks
+            Threads.@spawn begin
+                infl = _take_scratch(slack)
+                plain = _take_scratch(slack)
+                try
+                    for k in t:ntasks:length(jobs)
+                        _place_chunk!(out, plan, jobs[k], view(bytes, span[k]), mask[k],
+                                      infl, plain, rows, cols)
+                    end
+                finally
+                    _give_scratch(infl)
+                    _give_scratch(plain)
+                end
+            end
+        end
+    finally
+        _give_scratch(bytes)
+    end
+    return out
+end
+
+# **A pool, because these buffers are megabytes and a blocked reader asks for them thousands of times.** A
+# 2048² window of a NISAR band needs 24 MiB for the stored bytes and 2.4 MiB per decoding task; allocating
+# that per read made the garbage collector, not the inflate, the limit on how much of the machine a
+# concurrent read could use.
+#
+# Bounded by how many reads are in flight at once rather than by a byte budget: a buffer is only ever held
+# for the duration of one read, so the pool settles at the concurrency the caller actually uses. Buffers are
+# handed out by "big enough", and a request larger than anything free allocates rather than growing one in
+# place, so a single outsized read does not permanently inflate every slot.
+const SCRATCH_LOCK = ReentrantLock()
+const SCRATCH_FREE = Vector{Vector{UInt8}}()
+
+function _take_scratch(nbytes::Integer)
+    n = Int(nbytes)
+    got = @lock SCRATCH_LOCK begin
+        i = findfirst(b -> length(b) >= n, SCRATCH_FREE)
+        isnothing(i) ? nothing : popat!(SCRATCH_FREE, i)
+    end
+    return isnothing(got) ? Vector{UInt8}(undef, n) : got
+end
+
+_give_scratch(b::Vector{UInt8}) = (@lock SCRATCH_LOCK push!(SCRATCH_FREE, b); nothing)
+
+# Room for a chunk that did not compress. zlib's worst case on incompressible input is the input plus about
+# a thousandth, and a stored chunk is never larger than that, so the whole chunk plus an eighth is slack
+# enough to hold any intermediate the filter chain produces.
+_scratch_bytes(plan::ChunkPlan) = plan.bytes + plan.bytes ÷ 8 + 1024
+
+# One decoded chunk's contribution to `out`, which is indexed `(line, sample)` where the chunk's bytes are
+# `(sample, line)` — so this is a transposing copy of the rectangle the two have in common.
+function _place_chunk!(out::Matrix{T}, plan::ChunkPlan{T}, job::Tuple{Int,Int},
+                       raw::AbstractVector{UInt8}, mask::UInt32,
+                       infl::Vector{UInt8}, plain::Vector{UInt8},
+                       rows::AbstractUnitRange{<:Integer},
+                       cols::AbstractUnitRange{<:Integer}) where {T}
+    is, il = job
+    cs, cl = plan.chunk
+    srows = intersect(rows, ((il - 1) * cl + 1):(il * cl))
+    scols = intersect(cols, ((is - 1) * cs + 1):(is * cs))
+    (isempty(srows) || isempty(scols)) && return out
+
+    if isempty(raw)
+        for s in scols, l in srows
+            out[l - first(rows) + 1, s - first(cols) + 1] = plan.fill
+        end
+        return out
+    end
+
+    n = length(raw)
+    copyto!(plain, 1, raw, 1, n)
+    for (i, (id, cd)) in pairs(plan.undo)
+        (mask >> (length(plan.undo) - i)) & 0x1 == 1 && continue
+        if id == H5Z_DEFLATE
+            n = _inflate!(infl, plain, n)
+            plain, infl = infl, plain
+        else                                      # H5Z_SHUFFLE
+            # Whatever length it is handed, as the filter itself does: shuffle is not necessarily the first
+            # filter a writer applied, so its input is not necessarily a whole chunk.
+            _unshuffle!(infl, plain, cd == 0 ? sizeof(T) : cd, n)
+            plain, infl = infl, plain
+        end
+    end
+    n == plan.bytes || throw(ArgumentError(
+        "a chunk decoded to $n bytes where the chunk is $(plan.bytes)"))
+
+    got = reshape(reinterpret(T, view(plain, 1:plan.bytes)), cs, cl)
+    # `out` is contiguous down its first axis, so the destination is walked in order and `got` strided.
+    for s in scols
+        j = s - first(cols) + 1
+        gs = s - (is - 1) * cs
+        for l in srows
+            out[l - first(rows) + 1, j] = got[gs, l - (il - 1) * cl]
+        end
+    end
+    return out
+end
+
+# zlib `uncompress` on the first `n` bytes of `src`, which is the stream HDF5's deflate filter writes —
+# `compress2`, so zlib-wrapped with an adler32 rather than a raw deflate block.
+function _inflate!(dst::Vector{UInt8}, src::Vector{UInt8}, n::Integer)
+    len = Ref{Csize_t}(length(dst))
+    rc = ccall((:uncompress, Zlib_jll.libz), Cint,
+               (Ptr{UInt8}, Ptr{Csize_t}, Ptr{UInt8}, Csize_t),
+               dst, len, src, Csize_t(n))
+    rc == 0 || throw(ArgumentError("zlib could not inflate a chunk: uncompress returned $rc"))
+    return Int(len[])
+end
+
+# HDF5's shuffle filter groups the first byte of every element, then the second, and so on. The trailing
+# `n % elsize` bytes are left where they are, which is what the filter does with them.
+function _unshuffle!(dst::Vector{UInt8}, src::Vector{UInt8}, elsize::Integer, n::Integer)
+    es = Int(elsize)
+    nelem = Int(n) ÷ es
+    k = 1
+    for b in 1:es
+        j = b
+        for _ in 1:nelem
+            dst[j] = src[k]
+            j += es
+            k += 1
+        end
+    end
+    for i in (nelem * es + 1):Int(n)
+        dst[i] = src[i]
+    end
+    return dst
 end
 
 Base.getindex(r::NisarRaster, i::Int, j::Int) = r[i:i, j:j][1, 1]
