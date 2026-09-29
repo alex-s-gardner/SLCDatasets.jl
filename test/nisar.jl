@@ -354,6 +354,14 @@ end
         DiskArrays.readblock!(p, view(dest, 3:6, 2:4), 5:8, 11:13)
         @test dest[3:6, 2:4] == A[5:8, 11:13]
         @test all(iszero, dest[1:2, :])
+
+        # **The grid survives `amplitude`**, which is the form a consumer is handed: without forwarding it
+        # reports `DiskArrays`' fallback for a plain array and a caller sees no boundaries to align to.
+        @test DiskArrays.haschunks(amplitude(p)) === DiskArrays.Chunked()
+        @test map(length, first(DiskArrays.eachchunk(amplitude(p)))) == (8, 5)
+        @test DiskArrays.haschunks(amplitude(q)) === DiskArrays.Unchunked()
+        # An in-memory parent keeps the fallback rather than claiming storage chunks it does not have.
+        @test DiskArrays.haschunks(amplitude(A)) === DiskArrays.Unchunked()
     end
 end
 
