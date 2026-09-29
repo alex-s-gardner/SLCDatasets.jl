@@ -427,7 +427,7 @@ end
 """
     _read_by_chunks!(out, r, plan, rows, cols) -> out
 
-`r[rows, cols]` read a chunk at a time, with the decompression outside [`HDF5_IO`](@ref).
+`r[rows, cols]` read a chunk at a time, with the decompression outside `HDF5_IO`.
 
 **This is what lets a blocked reader use more than one core.** `H5Dread` runs the filter pipeline itself, so
 a window read that goes through it inflates inside the lock and every other task waits — measured at 2.6 of
