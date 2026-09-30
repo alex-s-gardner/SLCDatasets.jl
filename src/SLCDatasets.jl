@@ -56,7 +56,7 @@ export merge_bursts, pixels, amplitude, validmask
 export is_tops, deramp_parameters, burst_at
 export DerampParameters, RangePolynomial, nearest_polynomial
 export SLC, SLCSeries, Identification, RadarGeometry, StateVectors
-export Sentinel1Product
+export Sentinel1Product, subswath_borders
 export LocalFile, RemoteHTTP, RemoteS3
 export AsfBurst, asf_bursts
 # `grid` stays unexported for the reason `LookSide` does: a raster or geometry package consuming this one
