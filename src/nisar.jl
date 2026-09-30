@@ -293,10 +293,12 @@ end
 # calling into the C library segfault rather than racing visibly, so every call a caller can reach from more
 # than one task goes through this.
 #
-# It is therefore the ceiling on how much of a machine a blocked reader can use, and as little as possible
-# belongs inside it. `H5Dread` does not qualify: on a filtered dataset it inflates the chunks itself, which
-# is the bulk of a window read — hence [`_read_by_chunks!`](@ref), which keeps only the compressed byte read
-# under the lock.
+# A chunk's address in the file never changes once it is written, so [`_build_chunk_index`](@ref) reads
+# every chunk's address, size and filter mask in one locked pass and a read afterward touches this only to
+# build that index the first time a dataset is opened. A dataset whose index cannot be built this way falls
+# back to [`_read_by_chunks_locked!`](@ref), which holds the lock for the compressed byte read of every
+# chunk it touches — the bulk of a window read is still outside it, since `H5Dread` would run the filter
+# pipeline itself and inflate under the lock too.
 const HDF5_IO = ReentrantLock()
 
 # **A window read opens the file, and keeping the handle or the dataset open instead does not work.** A
@@ -357,8 +359,11 @@ Fill `dest` with `r[rows, cols]`.
 The only read method this type defines: `DiskArrays` builds `getindex` for scalars, strided and arbitrary
 indices, views and broadcasting on top of it, and batches a request that spans chunks.
 
-A chunked dataset takes [`_read_by_chunks!`](@ref), which decodes outside the thread-safety lock. An
-unchunked one goes through `H5Dread`, where there is no filter to run and so nothing to move off the lock.
+A chunked dataset whose chunk index [`_build_chunk_index`](@ref) could enumerate takes
+[`_read_by_chunks_mapped!`](@ref), which touches neither `HDF5_IO` nor the library. One whose index could
+not be built, or that carries a filter this package does not decode, takes
+[`_read_by_chunks_locked!`](@ref). An unchunked dataset goes through `H5Dread`, where there is no filter to
+run and so nothing to move off the lock.
 """
 function DiskArrays.readblock!(r::NisarRaster{T}, dest::AbstractArray{T,2},
                                rows::AbstractUnitRange{<:Integer},
@@ -366,7 +371,10 @@ function DiskArrays.readblock!(r::NisarRaster{T}, dest::AbstractArray{T,2},
     size(dest) == (length(rows), length(cols)) || throw(DimensionMismatch(
         "a $(size(dest)) destination cannot hold a $(length(rows)) x $(length(cols)) window"))
     plan = _chunk_plan(r)
-    isnothing(plan) || return _read_by_chunks!(dest, r, plan, rows, cols)
+    if !isnothing(plan)
+        isnothing(plan.index) && return _read_by_chunks_locked!(dest, r, plan, rows, cols)
+        return _read_by_chunks_mapped!(dest, plan, rows, cols)
+    end
 
     # The hyperslab under the lock, the transpose outside it: `permutedims` of a window is a third of the
     # cost and needs no library call, so holding `HDF5_IO` across it would serialize concurrent readers on
@@ -407,10 +415,87 @@ DiskArrays.haschunks(r::NisarRaster) =
 # ---------------------------------------------------------------------------
 
 """
+    ChunkIndex
+
+Every chunk of a dataset, resolved once: its absolute byte address and stored size in the file, and its
+filter mask, indexed `[is, il]` the way [`ChunkPlan`](@ref)'s fields are. `mapped` is the whole file,
+memory-mapped read-only.
+
+An address of [`UNALLOCATED_CHUNK`](@ref) is a chunk that was never written, which reads as the dataset's
+fill value.
+"""
+struct ChunkIndex
+    addrs::Matrix{UInt64}
+    sizes::Matrix{UInt32}
+    masks::Matrix{UInt32}
+    mapped::Vector{UInt8}
+end
+
+"""
+    UNALLOCATED_CHUNK
+
+The address [`ChunkIndex`](@ref) records for a chunk that has never been written — HDF5's own sentinel for
+an undefined address, so a lookup needs no separate allocated/unallocated flag.
+"""
+const UNALLOCATED_CHUNK = typemax(UInt64)
+
+"""
+    _build_chunk_index(d, chunk, nchunks) -> Union{ChunkIndex,Nothing}
+
+[`ChunkIndex`](@ref) for `d`, built by enumerating its chunk index once rather than looking a chunk up when
+it is touched.
+
+**This is what removes the lock from the byte read.** A chunk's address does not change once it is written,
+so once every address is known, reading a chunk's compressed bytes is an ordinary read of the memory-mapped
+file — no library call, so no need for `HDF5_IO` at all.
+
+**That is a smaller win than it sounds on a real window, because the byte read was never the dominant cost.**
+`_place_chunk!`'s inflate and un-shuffle already ran outside any lock and across every available
+thread in [`_read_by_chunks_locked!`](@ref); what changes here is the byte read that fed them and a
+gather-into-buffer copy this makes unnecessary. Ten overlapping 2048² amplitude windows of a GSLC band, ten
+threads: 0.211 s serial and 0.113 s concurrent through `_read_by_chunks_locked!`, against 0.188 s and 0.102 s
+here — 10 to 13% faster, with the *ratio* of serial to concurrent unchanged at 1.85x either way, since decode
+dominates both. One window alone is 0.029 s against 0.022 s, the larger share of that from the copy this
+avoids.
+
+`nothing` if the chunk index cannot be enumerated this way — a chunk index type this call of the installed
+HDF5 does not support — or if the file cannot be mapped, in which case [`_read_by_chunks_locked!`](@ref)
+remains correct, just without this.
+"""
+function _build_chunk_index(d::HDF5.Dataset, chunk::Tuple{Int,Int}, nchunks::Tuple{Int,Int})
+    cs, cl = chunk
+    addrs = fill(UNALLOCATED_CHUNK, nchunks)
+    sizes = zeros(UInt32, nchunks)
+    masks = zeros(UInt32, nchunks)
+    try
+        n = Ref{HDF5.API.hsize_t}(0)
+        HDF5.API.h5d_get_num_chunks(d, HDF5.API.H5S_ALL, n)
+        for i in 0:(Int(n[]) - 1)
+            info = HDF5.API.h5d_get_chunk_info(d, HDF5.API.H5S_ALL, i)
+            il = Int(info.offset[1]) ÷ cl + 1
+            is = Int(info.offset[2]) ÷ cs + 1
+            addrs[is, il] = info.addr
+            sizes[is, il] = info.size
+            masks[is, il] = info.filter_mask
+        end
+    catch e
+        e isa HDF5.API.H5Error || rethrow()
+        return nothing
+    end
+    mapped = try
+        open(io -> mmap(io, Vector{UInt8}, filesize(io)), HDF5.filename(d), "r")
+    catch e
+        e isa SystemError || rethrow()
+        return nothing
+    end
+    return ChunkIndex(addrs, sizes, masks, mapped)
+end
+
+"""
     ChunkPlan{T}
 
-How a dataset's samples are stored: the chunk shape, the value an unwritten chunk reads as, and the filters
-to undo in read order.
+How a dataset's samples are stored: the chunk shape, the value an unwritten chunk reads as, the filters to
+undo in read order, and — where it could be built — every chunk's address.
 
 `chunk` and `nchunks` are in the *file's* `HDF5.jl`-reported order — `(sample, line)` — because that is the
 order a chunk's bytes arrive in and the order the offsets are computed from.
@@ -427,14 +512,15 @@ struct ChunkPlan{T}
     # `(filter id, first client value)` in the order to *undo* them, which is the reverse of the order the
     # creation property list lists and therefore of the order they were applied on write.
     undo::Vector{Tuple{Int,Int}}
+    index::Union{ChunkIndex,Nothing}
 end
 
 const H5Z_DEFLATE = 1
 const H5Z_SHUFFLE = 2
 
-# Resolved once per dataset, because it costs three library calls and never changes. `nothing` means the
-# chunked path does not apply: an unchunked dataset, or one carrying a filter with no decoder here — in
-# which case `H5Dread` is still correct, just serial.
+# Resolved once per dataset, because it costs a handful of library calls plus a pass over the chunk index
+# and none of it changes. `nothing` means the chunked path does not apply at all: an unchunked dataset, or
+# one carrying a filter with no decoder here — in which case `H5Dread` is still correct, just serial.
 const CHUNK_PLANS = Dict{Tuple{String,String},Union{ChunkPlan,Nothing}}()
 const CHUNK_PLAN_LOCK = ReentrantLock()
 
@@ -471,39 +557,41 @@ function _chunk_plan(d::HDF5.Dataset, ::Type{T}) where {T}
     # and `HDF5.datatype(d)` is the dataset's own — so a compound `ComplexF32` arrives as one.
     fill = Ref{T}(zero(T))
     HDF5.API.h5p_get_fill_value(dcpl, HDF5.datatype(d), fill)
-    return ChunkPlan{T}(chunk, Tuple(cld.(size(d), chunk)), prod(chunk) * sizeof(T), fill[], undo)
+    nchunks = Tuple(cld.(size(d), chunk))
+    index = _build_chunk_index(d, chunk, nchunks)
+    return ChunkPlan{T}(chunk, nchunks, prod(chunk) * sizeof(T), fill[], undo, index)
+end
+
+# The chunks a window touches, as `(is, il)` pairs — the chunk's index along samples and along lines. Flat,
+# because the work is handed out by linear index and a two-dimensional comprehension would make `pairs`
+# yield `CartesianIndex` keys.
+function _chunk_jobs(plan::ChunkPlan, rows::AbstractUnitRange{<:Integer}, cols::AbstractUnitRange{<:Integer})
+    cs, cl = plan.chunk
+    return vec([(is, il)
+                for is in (fld(first(cols) - 1, cs) + 1):(fld(last(cols) - 1, cs) + 1),
+                    il in (fld(first(rows) - 1, cl) + 1):(fld(last(rows) - 1, cl) + 1)])
 end
 
 """
-    _read_by_chunks!(out, r, plan, rows, cols) -> out
+    _read_by_chunks_locked!(out, r, plan, rows, cols) -> out
 
-`r[rows, cols]` read a chunk at a time, with the decompression outside `HDF5_IO`.
+`r[rows, cols]` read a chunk at a time under `HDF5_IO`, with the decompression outside it.
 
-**This is what lets a blocked reader use more than one core.** `H5Dread` runs the filter pipeline itself, so
-a window read that goes through it inflates inside the lock and every other task waits — measured at 2.6 of
-10 threads on a blocked correlation, with nine threads parked in `__psynch_cvwait` and one in
-`inflate_fast`. `H5Dread_chunk` instead hands back a chunk's stored bytes with no filter applied, so the
-serialized part is a byte read and the inflate is ordinary Julia work on any thread.
+Taken when [`ChunkPlan`](@ref)'s `index` is `nothing` — a dataset whose chunk index
+[`_build_chunk_index`](@ref) could not enumerate. `H5Dread` runs the filter pipeline itself, so a window
+read that went through it would inflate inside the lock and every other task would wait; `H5Dread_chunk`
+instead hands back a chunk's stored bytes with no filter applied, so the serialized part here is the byte
+read alone and the inflate is ordinary Julia work on any thread.
 
-**Buffers are pooled and the stored bytes land in one array**, because the allocation is otherwise what
-limits the concurrency this exists to deliver: a byte vector per chunk is 24 MiB per 2048² window and two
-scratch buffers per task another 48 MiB, and ten block reads in flight turn that into half a gigabyte of
-garbage per round.
-
-Measured on a NISAR GSLC band, ten overlapping 2048² amplitude windows on ten threads: 1.312 s through
-`H5Dread` — slower than reading them one at a time, which is what a contended lock looks like — against
-0.126 s here, with concurrency now worth 1.60x rather than 0.66x. One window alone went from 0.707 s to
-0.029 s, the larger part of that from making this method's return type inferrable.
+Buffers are pooled and the stored bytes land in one array, because the allocation is otherwise what limits
+the concurrency this delivers: a byte vector per chunk is 24 MiB per 2048² window and two scratch buffers
+per task another 48 MiB, and ten block reads in flight turn that into half a gigabyte of garbage per round.
 """
-function _read_by_chunks!(out::AbstractMatrix{T}, r::NisarRaster{T}, plan::ChunkPlan{T},
-                          rows::AbstractUnitRange{<:Integer},
-                          cols::AbstractUnitRange{<:Integer}) where {T}
+function _read_by_chunks_locked!(out::AbstractMatrix{T}, r::NisarRaster{T}, plan::ChunkPlan{T},
+                                 rows::AbstractUnitRange{<:Integer},
+                                 cols::AbstractUnitRange{<:Integer}) where {T}
     cs, cl = plan.chunk                  # file order: samples, then lines
-    # `(is, il)`: the chunk's index along samples and along lines. Flat, because the work is handed out by
-    # linear index and a two-dimensional comprehension would make `pairs` yield `CartesianIndex` keys.
-    jobs = vec([(is, il)
-                for is in (fld(first(cols) - 1, cs) + 1):(fld(last(cols) - 1, cs) + 1),
-                    il in (fld(first(rows) - 1, cl) + 1):(fld(last(rows) - 1, cl) + 1)])
+    jobs = _chunk_jobs(plan, rows, cols)
 
     # Every chunk's stored bytes end to end, with `span[k]` naming chunk `k`'s slice and its filter mask. An
     # unallocated chunk gets an empty span, which is how the fill value is signalled.
@@ -554,6 +642,44 @@ function _read_by_chunks!(out::AbstractMatrix{T}, r::NisarRaster{T}, plan::Chunk
         end
     finally
         _give_scratch(bytes)
+    end
+    return out
+end
+
+"""
+    _read_by_chunks_mapped!(out, plan, rows, cols) -> out
+
+`r[rows, cols]` read from [`ChunkPlan`](@ref)'s `index`, with no call into HDF5 and no lock.
+
+Every job's compressed bytes are a view of `index.mapped` at that chunk's own address — a chunk unallocated
+at the time [`_build_chunk_index`](@ref) ran is [`UNALLOCATED_CHUNK`](@ref), the same signal
+`_place_chunk!` already reads as the fill value. No `r` argument, unlike
+[`_read_by_chunks_locked!`](@ref): everything a read needs is in `plan` once the index exists.
+"""
+function _read_by_chunks_mapped!(out::AbstractMatrix{T}, plan::ChunkPlan{T},
+                                 rows::AbstractUnitRange{<:Integer},
+                                 cols::AbstractUnitRange{<:Integer}) where {T}
+    idx = plan.index::ChunkIndex
+    jobs = _chunk_jobs(plan, rows, cols)
+    slack = _scratch_bytes(plan)
+    ntasks = max(1, min(Threads.nthreads(), length(jobs)))
+    @sync for t in 1:ntasks
+        Threads.@spawn begin
+            infl = _take_scratch(slack)
+            plain = _take_scratch(slack)
+            try
+                for k in t:ntasks:length(jobs)
+                    is, il = jobs[k]
+                    addr = idx.addrs[is, il]
+                    raw = addr == UNALLOCATED_CHUNK ? view(idx.mapped, 1:0) :
+                          view(idx.mapped, (Int(addr) + 1):(Int(addr) + Int(idx.sizes[is, il])))
+                    _place_chunk!(out, plan, (is, il), raw, idx.masks[is, il], infl, plain, rows, cols)
+                end
+            finally
+                _give_scratch(infl)
+                _give_scratch(plain)
+            end
+        end
     end
     return out
 end
