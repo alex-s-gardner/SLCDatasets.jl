@@ -280,6 +280,16 @@ end
                                          samples = A, chunk = ch, filters)
             p = pixels(open_slc(path))
             @testset "$label" begin
+                # **The chunked arms build a chunk index and read through it, not through the fallback.**
+                # Every assertion below would still pass on the fallback path, which would silently hide a
+                # regression that stopped the index from being built.
+                plan = SLCDatasets._chunk_plan(p)
+                if ch === nothing
+                    @test plan === nothing
+                else
+                    @test !isnothing(plan) && !isnothing(plan.index)
+                end
+
                 @test size(p) == (37, 23)
                 @test p[:, :] == A
                 # Windows that each stress one thing: wholly inside a chunk, straddling one boundary on
@@ -299,6 +309,31 @@ end
                 @test fetch.([Threads.@spawn p[r, c] for (r, c) in wins]) ==
                       [A[r, c] for (r, c) in wins]
             end
+        end
+    end
+end
+
+@testset "the mapped read agrees with the locked one it replaces" begin
+    # Both are correct by construction if `_place_chunk!` is fed the same bytes and mask, but this checks
+    # the wiring around it: address arithmetic, the unallocated sentinel, and axis order in the enumerated
+    # offset — none of which the locked path exercises, since it looks a chunk up by coordinate instead of
+    # by enumerated index.
+    A = ComplexF32[complex(i, -j) for i in 1:37, j in 1:23]
+    mktempdir() do dir
+        # Written with a gap: rows 1:2 are never touched, so some chunks are unallocated and the sentinel
+        # path runs on both sides.
+        path = write_fixture_geocoded(joinpath(dir, "gap.h5"); samples = A, chunk = (5, 8),
+                                      fill = ComplexF32(NaN32, NaN32), written = (3:37, 1:23))
+        p = pixels(open_geocoded(path))
+        plan = SLCDatasets._chunk_plan(p)
+        @test !isnothing(plan.index)
+
+        for (rows, cols) in ((1:37, 1:23), (1:4, 1:6), (2:9, 3:14), (30:37, 17:23), (12:12, 12:12))
+            mapped = Matrix{ComplexF32}(undef, length(rows), length(cols))
+            locked = Matrix{ComplexF32}(undef, length(rows), length(cols))
+            SLCDatasets._read_by_chunks_mapped!(mapped, plan, rows, cols)
+            SLCDatasets._read_by_chunks_locked!(locked, p, plan, rows, cols)
+            @test isequal(mapped, locked)
         end
     end
 end
