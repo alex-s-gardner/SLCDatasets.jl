@@ -10,6 +10,7 @@ include("tiff_fixture.jl")
     @time @testset "measurement raster" begin include("tiff.jl") end
     @time @testset "NISAR reader" begin include("nisar.jl") end
     @time @testset "Sentinel-1 reader" begin include("sentinel1.jl") end
+    @time @testset "subswath offset-bias borders" begin include("subswath_borders.jl") end
     @time @testset "burst grid" begin include("burstgrid.jl") end
     @time @testset "merged bursts" begin include("merge.jl") end
     @time @testset "ASF bursts" begin include("asf.jl") end

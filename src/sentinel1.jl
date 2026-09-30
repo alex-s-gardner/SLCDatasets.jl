@@ -527,6 +527,56 @@ function annotation(p::Sentinel1Product, swath::Integer)
     return p.annotations[i]
 end
 
+# A subswath's far-range sample, from its near-range and its own pixel spacing — the same arithmetic
+# for every subswath, so written once.
+_far_range(a::SubswathAnnotation) = a.starting_range + (a.samples_per_burst - 1.0) * a.range_pixel_spacing
+
+"""
+    subswath_borders(reference::Sentinel1Product, secondary::Sentinel1Product) -> NamedTuple
+
+Where IW1/IW2 and IW2/IW3 meet in a mosaic's range-sample columns, for the ITS_LIVE Sentinel-1
+subswath-offset-bias correction.
+
+Both products must have been opened for all three subswaths (`swaths = 1:3` — the default); this
+correction has no meaning for a single-burst or single-subswath product, which
+[`AutoRIFT.write`](https://github.com/alex-s-gardner/AutoRIFT.jl) does not apply it to (see there).
+
+# Fields
+
+- `ncols`: the mosaic's total range-sample width, from IW1's near range to IW3's far range.
+- `border12`, `border23`: the midpoint column, in that same range-sample index, of each subswath
+  boundary's near/far overlap.
+- `same_platform`: whether `reference` and `secondary` are the same physical spacecraft
+  (`SubswathAnnotation.mission`, e.g. both `"S1A"`) — the correction is not applied to a same-platform
+  pair, since the bias it corrects is a difference between the two spacecraft's antenna patterns.
+- `reference_platform`: `reference`'s own mission string, which decides the correction's sign.
+
+Column indices are computed relative to IW1's own near range and pixel spacing, matching the
+reference implementation (`hyp3-autorift`'s `cal_swath_offset_bias`) exactly — not derived
+independently, since a plausible-looking equivalent (e.g. rounding at a different step) would shift
+every border by up to a pixel.
+"""
+function subswath_borders(reference::Sentinel1Product, secondary::Sentinel1Product)
+    length(reference.swaths) == 3 && reference.swaths == [1, 2, 3] || throw(ArgumentError(
+        "subswath_borders needs `reference` opened for all three subswaths (swaths = 1:3), got " *
+        "$(reference.swaths)"))
+    length(secondary.swaths) == 3 && secondary.swaths == [1, 2, 3] || throw(ArgumentError(
+        "subswath_borders needs `secondary` opened for all three subswaths (swaths = 1:3), got " *
+        "$(secondary.swaths)"))
+
+    iw1, iw2, iw3 = reference.annotations
+    r0, sp0 = iw1.starting_range, iw1.range_pixel_spacing
+    col(range) = round(Int, (range - r0) / sp0)
+
+    ncols = col(_far_range(iw3))
+    border12 = (col(iw2.starting_range) + col(_far_range(iw1))) / 2
+    border23 = (col(iw3.starting_range) + col(_far_range(iw2))) / 2
+
+    return (; ncols, border12, border23,
+            same_platform = iw1.mission == secondary.annotations[1].mission,
+            reference_platform = iw1.mission)
+end
+
 """
     nbursts(p::Sentinel1Product, swath) -> Int
     nbursts(path; swath = 1, polarization = nothing) -> Int
