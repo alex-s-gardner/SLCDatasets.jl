@@ -1,6 +1,6 @@
 name = "SLCDatasets"
 uuid = "1d8f5cac-0b48-4ea8-8d35-4fce00b6c96f"
-version = "1.0.0-DEV"
+version = "1.0.0"
 authors = ["Alex S. Gardner, JPL/NASA"]
 
 [deps]
