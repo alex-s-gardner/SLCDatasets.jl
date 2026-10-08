@@ -39,14 +39,15 @@ at a time as they are indexed. A remote product is read in place: opening it tra
 and a window of its samples the chunks that window covers.
 
 ```julia
-s = open_slc(RemoteHTTP(url))                  # token from ENV["EARTHDATA_TOKEN"]
+s = open_slc(RemoteHTTP(url))                  # Earthdata Login from ~/.netrc
 s = open_slc(RemoteS3("s3://bucket/key.h5"))   # needs `using AWSS3`
 pixels(s)[20001:22048, 30001:32048]            # reads only the chunks it needs
 ```
 
-Earthdata URLs authenticate with an Earthdata Login bearer token, taken from `EARTHDATA_TOKEN` or passed
-as `RemoteHTTP(url; token)`. The host answers with a redirect to a pre-signed URL, and the token is not
-sent on to it.
+Earthdata URLs authenticate with an Earthdata Login bearer token: `RemoteHTTP(url; token)`,
+`EARTHDATA_TOKEN`, or — with neither — one obtained from the `machine urs.earthdata.nasa.gov` entry of
+`~/.netrc`, so that entry is the only setup. The host answers with a redirect to a pre-signed URL, and the
+token is not sent on to it.
 
 ## Feeding a geometry kernel
 
