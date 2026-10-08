@@ -1,6 +1,7 @@
 # Reading a real granule over the network.
 #
-# Needs an Earthdata Login token in `EARTHDATA_TOKEN` and transfers a few megabytes, so it runs only when
+# Needs an Earthdata Login token, from `EARTHDATA_TOKEN` or the `~/.netrc` entry for
+# `urs.earthdata.nasa.gov`, and transfers a few megabytes, so it runs only when
 # `SAR_LIVE_TEST=1`. What it proves that the fixture tests cannot: that a multi-gigabyte product on a
 # DAAC opens through the redirect chain, and that opening it and reading a window of it transfer a small
 # fraction of it.
@@ -41,8 +42,7 @@ end
 SLCDatasets.source_uri(s::CountedHTTP) = s.url
 SLCDatasets.source_transport(s::CountedHTTP) = s.transport
 
-let token = get(ENV, "EARTHDATA_TOKEN", "")
-    isempty(token) && error("the live granule test needs an Earthdata Login token in EARTHDATA_TOKEN")
+let token = get(() -> earthdata_token(), ENV, "EARTHDATA_TOKEN")
     t = Counted(HTTPTransport(; headers = ["Authorization" => "Bearer $token"]), Threads.Atomic{Int}(0))
     s = SLCDatasets._open_nisar(CountedHTTP(LIVE_URL, t); frequency = nothing)
     o = orbit(s)

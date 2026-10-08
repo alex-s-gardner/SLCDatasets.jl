@@ -7,7 +7,7 @@
 # `live_nisar.jl`.
 
 using SLCDatasets
-using SLCDatasets: localpath, source_for, source_uri, source_transport
+using SLCDatasets: localpath, source_for, source_uri, source_transport, _netrc_login, _earthdata_host
 using ChunkManifests: HTTPTransport
 using HTTP
 using Test
@@ -32,6 +32,7 @@ end
         @test RemoteHTTP("https://example.org/x.h5").token === nothing
         @test source_transport(RemoteHTTP("https://example.org/x.h5")) === nothing
     end
+    @test source_transport(RemoteHTTP("https://example.org/x.h5"; token = nothing, netrc = nothing)) === nothing
     @test source_transport(RemoteHTTP("https://example.org/x.h5"; token = "t")) isa HTTPTransport
     @test_throws "is read in place and has no local path" localpath(RemoteHTTP("https://example.org/x.h5"))
 end
@@ -80,5 +81,57 @@ _auth_handler(token, target) = req ->
             close(auth)
             close(data)
         end
+    end
+end
+
+@testset "a .netrc entry is read wherever it is spelled" begin
+    mktempdir() do dir
+        one = joinpath(dir, "one")
+        write(one, "machine other.host login a password b\nmachine urs.earthdata.nasa.gov login me password s3cret\n")
+        @test _netrc_login(one, "urs.earthdata.nasa.gov") == ("me", "s3cret")
+        spread = joinpath(dir, "spread")
+        write(spread, "machine urs.earthdata.nasa.gov\n    password p\n    login u\ndefault login x password y\n")
+        @test _netrc_login(spread, "urs.earthdata.nasa.gov") == ("u", "p")
+        @test _netrc_login(spread, "nowhere") === nothing
+        @test_throws "has no `machine urs.earthdata.nasa.gov login" earthdata_token(spread * "-absent")
+    end
+end
+
+@testset "only an Earthdata host is sent a token from .netrc" begin
+    @test _earthdata_host("https://nisar.asf.earthdatacloud.nasa.gov/NISAR/x.h5")
+    @test _earthdata_host("https://sentinel1.asf.alaska.edu/SLC/x.zip")
+    @test !_earthdata_host("https://example.org/x.h5")
+    @test !_earthdata_host("https://nasa.gov.example.org/x.h5")
+    mktempdir() do dir
+        netrc = joinpath(dir, "netrc")
+        write(netrc, "machine urs.earthdata.nasa.gov login me password s3cret\n")
+        withenv("EARTHDATA_TOKEN" => nothing, "NETRC" => netrc) do
+            @test RemoteHTTP("https://data.asf.alaska.edu/x.h5").netrc == netrc
+            @test RemoteHTTP("https://example.org/x.h5").netrc === nothing
+            @test RemoteHTTP("https://data.asf.alaska.edu/x.h5"; token = "t").netrc === nothing
+        end
+    end
+end
+
+@testset "a token is asked of Earthdata Login with the .netrc credentials" begin
+    seen = Ref("")
+    edl = HTTP.serve!("127.0.0.1", 0) do req
+        seen[] = HTTP.header(req, "Authorization", "")
+        seen[] == "Basic " * SLCDatasets.base64encode("me:s3cret") ?
+            HTTP.Response(200, "{\"access_token\":\"tok-1\",\"token_type\":\"Bearer\"}") :
+            HTTP.Response(401, "bad credentials")
+    end
+    try
+        mktempdir() do dir
+            good = joinpath(dir, "good")
+            write(good, "machine urs.earthdata.nasa.gov login me password s3cret\n")
+            url = "http://127.0.0.1:$(HTTP.port(edl))/api/users/find_or_create_token"
+            @test earthdata_token(good; url) == "tok-1"
+            bad = joinpath(dir, "bad")
+            write(bad, "machine urs.earthdata.nasa.gov login me password wrong\n")
+            @test_throws "refused the credentials" earthdata_token(bad; url)
+        end
+    finally
+        close(edl)
     end
 end

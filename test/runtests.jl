@@ -17,7 +17,8 @@ include("tiff_fixture.jl")
     @time @testset "access layer" begin include("remote.jl") end
     @time @testset "pairing" begin include("pairing.jl") end
     @time @testset "TOPS mode" begin include("tops.jl") end
-    # Transfers a few megabytes from a DAAC and needs an Earthdata Login token in `EARTHDATA_TOKEN`.
+    # Transfers a few megabytes from a DAAC and needs Earthdata Login credentials in `~/.netrc`, or a
+    # token in `EARTHDATA_TOKEN`.
     if get(ENV, "SAR_LIVE_TEST", "") == "1"
         @time @testset "live NISAR granule" begin include("live_nisar.jl") end
     else

@@ -50,9 +50,14 @@ const GEOCODED_TYPES = ("GSLC", "GCOV", "GUNW", "GOFF")
 
 The product at `path` — a local file, an `https://` URL or an `s3://` URI — scanned into a Zarr group.
 Only the file's metadata is read; a remote file is read in place, through `transport` when one is given.
+
+A remote file is never downloaded instead: a NISAR granule is gigabytes, so where the loaded libhdf5
+cannot read one in place this throws, naming the version it needs.
 """
 function nisar_group(path::AbstractString; transport = nothing)
-    return scan(path; driver = HDF5Driver(), transport)
+    occursin(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", path) || return scan(path; driver = HDF5Driver(), transport)
+    access = RangeAccess(; transport = something(transport, TransportContainers()))
+    return scan(path; driver = HDF5Driver(), access)
 end
 
 """

@@ -35,13 +35,15 @@ addressable without inflating everything before it.
 """
 module SLCDatasets
 
+using Base64: base64encode
 import Dates
 import DiskArrays
-using ChunkManifests: scan, GeoTIFFDriver, HDF5Driver, HTTPTransport
+using ChunkManifests: scan, GeoTIFFDriver, HDF5Driver, HTTPTransport, RangeAccess, TransportContainers
 using Dates: DateTime
 import EzXML
 using EzXML: parsexml, readxml, root, findfirst, findall, nodecontent, nodename, eachelement
 using HDF5: ishdf5
+import HTTP
 using Mmap: mmap
 using StaticArrays: SVector
 # Loaded for the ChunkManifests.jl extension that scans the Sentinel-1 measurement TIFFs.
@@ -59,7 +61,7 @@ export is_tops, deramp_parameters, burst_at
 export DerampParameters, RangePolynomial, nearest_polynomial
 export SLC, SLCSeries, Identification, RadarGeometry, StateVectors
 export Sentinel1Product, subswath_borders
-export LocalFile, RemoteHTTP, RemoteS3
+export LocalFile, RemoteHTTP, RemoteS3, earthdata_token
 export AsfBurst, asf_bursts
 # `grid` stays unexported for the reason `LookSide` does: a raster or geometry package consuming this one
 # defines its own, and exporting both makes the name ambiguous at every call site. `GeocodedProduct`
