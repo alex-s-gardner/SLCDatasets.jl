@@ -53,15 +53,26 @@ function open_slc(src::AbstractSLCSource; frequency = nothing, orbit = nothing,
     ishdf5(path) || throw(ArgumentError(
         "`$path` is neither an HDF5 file nor a Sentinel-1 SAFE product; those are the only " *
         "formats currently read"))
-    # One handle serves the band probe, the type dispatch, the frequency default and both metadata
-    # reads; each `h5open` costs about as much as a read, so reopening five times would dominate.
-    return h5open(path, "r") do h
-        band = nisar_band(h)
-        product_type = nisar_product_type(h, band)
-        freq = frequency === nothing ? default_frequency(h, band) : String(frequency)
-        backend = NisarBackend(path, band, product_type, freq)
-        return SLC(backend, read_identification(backend, h), read_geometry(backend, h))
-    end
+    return _open_nisar(src; frequency)
+end
+
+# A remote product is a NISAR one: a Sentinel-1 raster is only read from an unpacked `.SAFE`.
+open_slc(src::Union{RemoteHTTP,RemoteS3}; frequency = nothing) = _open_nisar(src; frequency)
+
+function _open_nisar(src::AbstractSLCSource; frequency)
+    backend = _nisar_backend(src; frequency)
+    return SLC(backend, read_identification(backend), read_geometry(backend))
+end
+
+# The one scan of a product that the band probe, the type dispatch, the frequency default and every
+# metadata and sample read then share.
+function _nisar_backend(src::AbstractSLCSource; frequency)
+    path = source_uri(src)
+    z = nisar_group(path; transport = source_transport(src))
+    band = nisar_band(z)
+    product_type = nisar_product_type(z, band)
+    freq = frequency === nothing ? default_frequency(z, band) : String(frequency)
+    return NisarBackend(path, band, product_type, freq, z)
 end
 
 function _open_sentinel1(path::AbstractString; orbit, swath, swaths, burst, polarization)
@@ -147,19 +158,6 @@ function bursts(p::Sentinel1Product, swath::Integer = first(p.swaths))
     return SLCSeries(i -> SLC(Sentinel1Backend(p, s, i)), n, SLC{Sentinel1Backend})
 end
 
-# A partly fetched product fails inside HDF5, reading zeros out of the hole past the prefetch window.
-# Reporting that as-is would leave a caller staring at an HDF5 stack trace, so the two remote sources
-# translate it into the knob that fixes it.
-function open_slc(src::Union{RemoteHTTP,RemoteS3}; frequency = nothing)
-    path = localpath(src)
-    return try
-        open_slc(LocalFile(path); frequency)
-    catch e
-        e isa ArgumentError && rethrow()
-        throw(_prefetch_error(src, path, e))
-    end
-end
-
 open_slc(path::AbstractString; kwargs...) = open_slc(source_for(path); kwargs...)
 
 """
@@ -174,17 +172,14 @@ function source_for(spec::AbstractString)
 end
 
 """
-    default_frequency(h, band) -> String
+    default_frequency(z, band) -> String
 
-The first sub-band a NISAR product lists, as the one to read when the caller names none.
+The first sub-band a scanned NISAR product lists, as the one to read when the caller names none.
 """
-function default_frequency(h, band::AbstractString)::String
+function default_frequency(z::Zarr.ZGroup, band::AbstractString)::String
     name = string(SCIENCE_ROOT, "/", band, "/identification/listOfFrequencies")
-    haskey(h, name) || return "A"
-    listed = read(_dataset(h, name))
-    isempty(listed) && throw(ArgumentError("`$(HDF5.filename(h))` lists no frequencies"))
+    _haskey(z, name) || return "A"
+    listed = _read(_dataset(z, name))
+    isempty(listed) && throw(ArgumentError("the product lists no frequencies"))
     return _string(first(listed))
 end
-
-default_frequency(path::AbstractString, band::AbstractString) =
-    h5open(h -> default_frequency(h, band), path, "r")

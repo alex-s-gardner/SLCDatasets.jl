@@ -10,11 +10,11 @@
 
 using SLCDatasets: read_annotation, annotation_xml, burst_grid, nbursts, valid_lines, valid_samples,
                    BurstGrid, MAX_BURST_GRID_RESIDUAL, placement_at
-using JSON3
+using JSON
 using Test
 
 const BURST_GRID_GOLD = let f = joinpath(@__DIR__, "reference", "burst_grid.json")
-    isfile(f) ? JSON3.read(read(f, String)) : nothing
+    isfile(f) ? JSON.parse(read(f, String)) : nothing
 end
 
 # The annotation of each committed case, however the product is reached.

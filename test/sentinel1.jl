@@ -23,7 +23,7 @@ using SLCDatasets: LookRight, SPEED_OF_LIGHT, Sentinel1Backend, UtcTime, seconds
            read_annotation, valid_lines, valid_samples
 using Dates
 using StaticArrays: SVector
-using JSON3
+using JSON
 using Test
 
 norm3(v) = sqrt(v[1]^2 + v[2]^2 + v[3]^2)

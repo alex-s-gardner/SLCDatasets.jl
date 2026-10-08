@@ -20,9 +20,8 @@ taken from it. Index it with ranges where the shape of the read allows: `p[rows,
 burst spanned, while scalar indexing resolves a row per sample.
 
 Not every product can reach its samples. A Sentinel-1 product read from a zip cannot — the raster is
-deflated inside it — and neither can a remote product whose image was never transferred; both say so
-rather than returning something partial. A NISAR product reads its samples out of its HDF5 dataset a
-window at a time; see [`SLCDatasets.NisarRaster`](@ref). [`amplitude`](@ref) for the real magnitudes, and
+deflated inside it — and says so rather than returning something partial. A NISAR product, local or
+remote, reads its samples out of its HDF5 dataset a chunk at a time; see [`SLCDatasets.NisarRaster`](@ref). [`amplitude`](@ref) for the real magnitudes, and
 [`validmask`](@ref) for which samples were imaged.
 """
 pixels(s::AbstractSLC) = read_pixels(s.backend)

@@ -1000,15 +1000,16 @@ end
 # describes, and reading it would silently return another burst's samples.
 function _subswath_raster(p::Sentinel1Product, swath::Integer)
     a = annotation(p, swath)
-    raster = open_tiff(measurement_path(p, swath))
+    file = measurement_path(p, swath)
+    raster = open_measurement(file)
 
     expected = a.lines_per_burst * nbursts(a)
     size(raster, 1) == expected || throw(ArgumentError(
-        "`$(path(raster))` has $(size(raster, 1)) lines, but subswath IW$swath has $(nbursts(a)) " *
+        "`$file` has $(size(raster, 1)) lines, but subswath IW$swath has $(nbursts(a)) " *
         "bursts of $(a.lines_per_burst) lines and so should have $expected. The raster and the " *
         "annotation describe different products"))
     size(raster, 2) == a.samples_per_burst || throw(ArgumentError(
-        "`$(path(raster))` is $(size(raster, 2)) samples wide but subswath IW$swath records " *
+        "`$file` is $(size(raster, 2)) samples wide but subswath IW$swath records " *
         "$(a.samples_per_burst)"))
     return raster, a
 end

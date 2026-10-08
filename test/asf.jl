@@ -7,7 +7,7 @@
 
 using SLCDatasets
 using SLCDatasets: AsfBurstBackend, asf_burst_url, asf_annotation, ASF_BURST_HOST,
-                   read_annotation, annotation_xml, measurement_path, open_tiff,
+                   read_annotation, annotation_xml, measurement_path, open_measurement,
                    Sentinel1Product, grid
 using Test
 
@@ -60,7 +60,7 @@ else
     # serve both. Checked against the `.SAFE` of the same granule where one is available.
     if !isempty(ASF_SAFE)
         @testset "an ASF burst equals the same burst of the .SAFE" begin
-            raster = open_tiff(measurement_path(
+            raster = open_measurement(measurement_path(
                 Sentinel1Product(ASF_SAFE; orbit = ASF_ORBIT, polarization = lowercase(ASF_POL)),
                 ASF_SWATH))
             a = read_annotation(annotation_xml(ASF_SAFE, ASF_SWATH, lowercase(ASF_POL)), ASF_SWATH)

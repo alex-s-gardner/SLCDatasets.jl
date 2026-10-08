@@ -11,9 +11,9 @@ The scope is SLCs in radar geometry, not SAR products generally. An interferogra
 product carries a multilooked grid, and a geocoded SLC carries map coordinates rather than a slant-range
 axis — neither is described by [`RadarGeometry`](@ref), so neither is read here.
 
-NISAR-format HDF5 range-Doppler products (RSLC) are read natively. The metadata of one is a few tens of
-kilobytes near the start of a file tens of gigabytes long, so a remote product can be opened without
-transferring it.
+NISAR-format HDF5 range-Doppler products (RSLC) are read through the Zarr group ChunkManifests.jl scans
+from them. The metadata of one is a few tens of kilobytes near the start of a file tens of gigabytes
+long, so a remote product is opened, and its samples read a chunk at a time, without transferring it.
 
 Sentinel-1 IW SLCs are read from a `.SAFE` directory or the zip of one, taking geometry from the
 annotation XML and state vectors from a POEORB or RESORB `.EOF` file, which a Sentinel-1 product does
@@ -37,14 +37,16 @@ module SLCDatasets
 
 import Dates
 import DiskArrays
-import HDF5
+using ChunkManifests: scan, GeoTIFFDriver, HDF5Driver, HTTPTransport
 using Dates: DateTime
 import EzXML
 using EzXML: parsexml, readxml, root, findfirst, findall, nodecontent, nodename, eachelement
-using HDF5: h5open, ishdf5, read_attribute
-import Zlib_jll
+using HDF5: ishdf5
 using Mmap: mmap
 using StaticArrays: SVector
+# Loaded for the ChunkManifests.jl extension that scans the Sentinel-1 measurement TIFFs.
+import TiffImages
+import Zarr
 using ZipArchives: ZipReader, zip_name, zip_nentries, zip_readentry
 
 export open_slc, bursts, orbit, nlines, nsamples, start_datetime, stop_datetime
@@ -70,7 +72,7 @@ export open_geocoded, GeocodedProduct, GeocodedGrid, geocoded_grid
 include("util.jl")
 include("time.jl")
 include("types.jl")
-include("tiff.jl")
+include("measurement.jl")
 include("nisar.jl")
 include("sentinel1.jl")
 include("burstgrid.jl")

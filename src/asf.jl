@@ -6,7 +6,7 @@
 # transfers those bursts rather than the several gigabytes of the whole product.
 #
 # The raster has the same layout a `.SAFE` measurement file does — uncompressed, one strip per line,
-# complex 16-bit samples — so `open_tiff` reads it unchanged. Unlike a `.SAFE`, each is its own file
+# complex 16-bit samples — so `open_measurement` reads it unchanged. Unlike a `.SAFE`, each is its own file
 # holding one burst, which is why a merge places them at row offset zero rather than at a burst's offset
 # into a stacked raster.
 #
@@ -35,8 +35,7 @@ Both files are fetched whole rather than by range: a burst raster is a couple of
 wanted entire. `dir` is where they are kept, defaulting to a temporary directory; pass one to keep them
 across sessions, and an already-downloaded file there is not fetched again.
 
-Authentication is from `~/.netrc`, as for [`RemoteHTTP`](@ref), so a `urs.earthdata.nasa.gov` entry is
-the only setup. The extractor generates a burst on first request and answers `202` until it is ready;
+Authentication is from `~/.netrc`, so a `urs.earthdata.nasa.gov` entry is the only setup. The extractor generates a burst on first request and answers `202` until it is ready;
 this retries until it is.
 
 # Examples
@@ -240,12 +239,13 @@ end
 # The file holds this burst alone, so its rows are the burst's own.
 function read_pixels(b::AsfBurstBackend)
     a = b.annotation
-    raster = open_tiff(localpath(b.source))
+    file = localpath(b.source)
+    raster = open_measurement(file)
     size(raster, 1) == a.lines_per_burst || throw(ArgumentError(
-        "`$(path(raster))` has $(size(raster, 1)) lines but subswath IW$(b.source.swath) records " *
+        "`$file` has $(size(raster, 1)) lines but subswath IW$(b.source.swath) records " *
         "$(a.lines_per_burst) per burst"))
     size(raster, 2) == a.samples_per_burst || throw(ArgumentError(
-        "`$(path(raster))` is $(size(raster, 2)) samples wide but subswath IW$(b.source.swath) " *
+        "`$file` is $(size(raster, 2)) samples wide but subswath IW$(b.source.swath) " *
         "records $(a.samples_per_burst)"))
     return raster
 end

@@ -15,7 +15,7 @@
 using SLCDatasets
 using SLCDatasets: MergedBurstBackend, ConcatenatedBursts, BurstValidMask, Amplitude,
            BurstGrid, BurstPlacement,
-                   read_annotation, annotation_xml, burst_grid, measurement_path, open_tiff,
+                   read_annotation, annotation_xml, burst_grid, measurement_path, open_measurement,
                    Sentinel1Product, UtcTime, seconds_between, valid_lines, valid_samples,
                    MAX_BURST_GRID_RESIDUAL, grid, safe_polarizations
 using Test
@@ -231,7 +231,7 @@ if !isempty(MERGE_SAFE) && !isempty(MERGE_EOF)
         b = bursts(MERGE_SAFE; orbit = MERGE_EOF, swath, polarization = pol)
         m = merge_bursts(b)
         a = read_annotation(annotation_xml(MERGE_SAFE, swath, pol), swath)
-        raster = open_tiff(measurement_path(
+        raster = open_measurement(measurement_path(
             Sentinel1Product(MERGE_SAFE; orbit = MERGE_EOF, polarization = pol), swath))
 
         px = pixels(m)

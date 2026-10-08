@@ -7,7 +7,7 @@ include("sentinel1_fixture.jl")
 include("tiff_fixture.jl")
 
 @testset verbose = true "SLCDatasets.jl" begin
-    @time @testset "measurement raster" begin include("tiff.jl") end
+    @time @testset "measurement raster" begin include("measurement.jl") end
     @time @testset "NISAR reader" begin include("nisar.jl") end
     @time @testset "Sentinel-1 reader" begin include("sentinel1.jl") end
     @time @testset "subswath offset-bias borders" begin include("subswath_borders.jl") end
@@ -17,7 +17,7 @@ include("tiff_fixture.jl")
     @time @testset "access layer" begin include("remote.jl") end
     @time @testset "pairing" begin include("pairing.jl") end
     @time @testset "TOPS mode" begin include("tops.jl") end
-    # Transfers a few megabytes from a DAAC and needs Earthdata credentials in `~/.netrc`.
+    # Transfers a few megabytes from a DAAC and needs an Earthdata Login token in `EARTHDATA_TOKEN`.
     if get(ENV, "SAR_LIVE_TEST", "") == "1"
         @time @testset "live NISAR granule" begin include("live_nisar.jl") end
     else

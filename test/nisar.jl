@@ -244,17 +244,14 @@ end
         @test amplitude(s) == abs.(A)
         @test_throws BoundsError p[1:8, 1:5]
 
-        # **A window read must be inferrable, because a consumer's loop is compiled against its type.**
-        # `HDF5.Dataset`'s own `getindex` is not, and an unannotated return propagated that all the way
-        # into `Amplitude`, whose per-sample conversion then dispatched at run time: 158 ns an element
-        # against 12, or 0.71 s against 0.05 for one 2048² window of a GSLC.
+        # **A window read must be inferrable, because a consumer's loop is compiled against its type.** An
+        # unannotated `Any` would propagate into `Amplitude`, whose per-sample conversion would then dispatch
+        # at run time.
         @test @inferred(p[2:5, 2:3]) isa Matrix{ComplexF32}
         @test @inferred(amplitude(p)[2:5, 2:3]) isa Matrix{Float32}
 
-        # **Concurrent windows, because a blocked caller reads from every thread it has.** The library is
-        # not thread-safe and one handle per file is kept open across reads, so the serialization has to be
-        # the lock's; unsynchronized access segfaults inside HDF5 rather than returning a wrong answer.
-        # Overlapping windows, so the same chunks are in flight at once.
+        # **Concurrent windows, because a blocked caller reads from every thread it has.** Overlapping
+        # windows, so the same chunks are in flight at once.
         rows = [i:min(i + 3, 7) for i in 1:4]
         @test fetch.([Threads.@spawn p[r, 1:5] for r in rows]) == [A[r, 1:5] for r in rows]
     end
@@ -268,8 +265,8 @@ end
     A = ComplexF32[complex(i, -j) for i in 1:37, j in 1:23]
     chunk = (5, 8)                      # file order: (sample, line), the transpose of Julia's
     mktempdir() do dir
-        # The same samples written three ways: the real product's filter chain, each filter alone, and
-        # unchunked — the last taking the `H5Dread` fallback, which must agree with the other three.
+        # The same samples written five ways: the real product's filter chain, each filter alone, no
+        # filter, and unchunked, which is one chunk spanning the dataset.
         arms = [("shuffle+deflate", (:shuffle, :deflate), chunk),
                 ("deflate", (:deflate,), chunk),
                 ("shuffle", (:shuffle,), chunk),
@@ -280,16 +277,6 @@ end
                                          samples = A, chunk = ch, filters)
             p = pixels(open_slc(path))
             @testset "$label" begin
-                # **The chunked arms build a chunk index and read through it, not through the fallback.**
-                # Every assertion below would still pass on the fallback path, which would silently hide a
-                # regression that stopped the index from being built.
-                plan = SLCDatasets._chunk_plan(p)
-                if ch === nothing
-                    @test plan === nothing
-                else
-                    @test !isnothing(plan) && !isnothing(plan.index)
-                end
-
                 @test size(p) == (37, 23)
                 @test p[:, :] == A
                 # Windows that each stress one thing: wholly inside a chunk, straddling one boundary on
@@ -302,38 +289,13 @@ end
                 @test @inferred(p[6:20, 3:18]) isa Matrix{ComplexF32}
                 @test amplitude(p)[6:20, 3:18] == abs.(A[6:20, 3:18])
 
-                # **Concurrent overlapping windows**, because the whole point of decoding outside the
-                # library's lock is that several tasks decode at once — and they share chunks, so a scratch
-                # buffer leaking between tasks would corrupt one of them.
+                # **Concurrent overlapping windows**, because a blocked reader decodes from every thread it
+                # has — and they share chunks, so a scratch buffer leaking between tasks would corrupt one
+                # of them.
                 wins = [(i:(i + 11), 2:20) for i in 1:5]
                 @test fetch.([Threads.@spawn p[r, c] for (r, c) in wins]) ==
                       [A[r, c] for (r, c) in wins]
             end
-        end
-    end
-end
-
-@testset "the mapped read agrees with the locked one it replaces" begin
-    # Both are correct by construction if `_place_chunk!` is fed the same bytes and mask, but this checks
-    # the wiring around it: address arithmetic, the unallocated sentinel, and axis order in the enumerated
-    # offset — none of which the locked path exercises, since it looks a chunk up by coordinate instead of
-    # by enumerated index.
-    A = ComplexF32[complex(i, -j) for i in 1:37, j in 1:23]
-    mktempdir() do dir
-        # Written with a gap: rows 1:2 are never touched, so some chunks are unallocated and the sentinel
-        # path runs on both sides.
-        path = write_fixture_geocoded(joinpath(dir, "gap.h5"); samples = A, chunk = (5, 8),
-                                      fill = ComplexF32(NaN32, NaN32), written = (3:37, 1:23))
-        p = pixels(open_geocoded(path))
-        plan = SLCDatasets._chunk_plan(p)
-        @test !isnothing(plan.index)
-
-        for (rows, cols) in ((1:37, 1:23), (1:4, 1:6), (2:9, 3:14), (30:37, 17:23), (12:12, 12:12))
-            mapped = Matrix{ComplexF32}(undef, length(rows), length(cols))
-            locked = Matrix{ComplexF32}(undef, length(rows), length(cols))
-            SLCDatasets._read_by_chunks_mapped!(mapped, plan, rows, cols)
-            SLCDatasets._read_by_chunks_locked!(locked, p, plan, rows, cols)
-            @test isequal(mapped, locked)
         end
     end
 end
@@ -369,8 +331,8 @@ end
         @test touched(1:16, 1:10) == 4            # two chunk rows by two chunk columns, on the boundary
         @test touched(5:20, 3:12) == 9            # the same extent, straddling both axes
 
+        # An unchunked dataset is one chunk spanning it.
         q = pixels(open_slc(plain))
-        @test DiskArrays.haschunks(q) === DiskArrays.Unchunked()
         @test size(DiskArrays.eachchunk(q)) == (1, 1)
 
         # Indexing forms `DiskArrays` provides on top of `readblock!`, none of them defined here.
@@ -394,7 +356,7 @@ end
         # reports `DiskArrays`' fallback for a plain array and a caller sees no boundaries to align to.
         @test DiskArrays.haschunks(amplitude(p)) === DiskArrays.Chunked()
         @test map(length, first(DiskArrays.eachchunk(amplitude(p)))) == (8, 5)
-        @test DiskArrays.haschunks(amplitude(q)) === DiskArrays.Unchunked()
+        @test size(DiskArrays.eachchunk(amplitude(q))) == (1, 1)
         # An in-memory parent keeps the fallback rather than claiming storage chunks it does not have.
         @test DiskArrays.haschunks(amplitude(A)) === DiskArrays.Unchunked()
     end

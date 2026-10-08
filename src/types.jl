@@ -241,6 +241,16 @@ A path that can be opened, materializing whatever the source needs to make that 
 localpath(src::LocalFile) = src.path
 
 """
+    source_uri(src::AbstractSLCSource) -> String
+    source_transport(src::AbstractSLCSource)
+
+What ChunkManifests.jl scans for `src`: the path or URI, and the transport to read it through, or
+`nothing` for the default.
+"""
+source_uri(src::AbstractSLCSource) = localpath(src)
+source_transport(::AbstractSLCSource) = nothing
+
+"""
     Identification
 
 What an acquisition is: mission, product, orbit and coverage.

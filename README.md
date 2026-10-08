@@ -31,21 +31,22 @@ time interval.
 ## Reading a remote product without transferring it
 
 A NISAR RSLC is tens of gigabytes, nearly all of it image samples. Its metadata is tens of kilobytes
-lying within the first few megabytes — measured by logging every byte range the HDF5 library requests,
-one granule needs 26 KiB spread over the first 4.79 MB.
+lying within the first few megabytes.
 
-So a remote product is opened by fetching its head with one ranged request into a sparse local file and
-reading that. The tail is never fetched and occupies no disk.
+A product is read through [ChunkManifests.jl](https://github.com/alex-s-gardner/ChunkManifests.jl),
+which scans its metadata into a Zarr group with byte-range requests and then reads the samples a chunk
+at a time as they are indexed. A remote product is read in place: opening it transfers the metadata,
+and a window of its samples the chunks that window covers.
 
 ```julia
-s = open_slc(RemoteHTTP(url))                  # 8 MB of an 11.77 GB granule
-s = open_slc(RemoteS3("s3://bucket/key.h5"))   # inside the bucket's region
+s = open_slc(RemoteHTTP(url))                  # token from ENV["EARTHDATA_TOKEN"]
+s = open_slc(RemoteS3("s3://bucket/key.h5"))   # needs `using AWSS3`
+pixels(s)[20001:22048, 30001:32048]            # reads only the chunks it needs
 ```
 
-Earthdata URLs authenticate from `~/.netrc` and follow the redirect to the signed data URL, so a
-`machine urs.earthdata.nasa.gov` entry is the only setup. A prefetch window too small to hold the
-metadata fails with the knob to raise rather than an HDF5 stack trace — a truncated read is never
-returned as though it were complete.
+Earthdata URLs authenticate with an Earthdata Login bearer token, taken from `EARTHDATA_TOKEN` or passed
+as `RemoteHTTP(url; token)`. The host answers with a redirect to a pre-signed URL, and the token is not
+sent on to it.
 
 ## Feeding a geometry kernel
 
@@ -161,7 +162,7 @@ ref = merge_bursts(b)
 ```
 
 Bursts are numbered from 1 here as everywhere else in this package, and the conversion to the
-extractor's 0-based URLs happens inside. Authentication is from `~/.netrc`, as for `RemoteHTTP`. The
+extractor's 0-based URLs happens inside. Authentication is from `~/.netrc`. The
 extractor builds a burst on first request and answers `202` until it is ready, which is retried; `dir`
 is where the files are kept, and one already there is not fetched again.
 
