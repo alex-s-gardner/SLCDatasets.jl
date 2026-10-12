@@ -63,12 +63,14 @@ const GEOCODED_TYPES = ("GSLC", "GCOV", "GUNW", "GOFF")
 
 The product at `path` — a local file, an `https://` URL or an `s3://` URI — open for reading. Only the
 metadata a read touches is transferred; a remote file is read in place, through `transport` when one is
-given. Close it with `close`.
+given. An `https://` URL is followed to where it redirects once and read from there: an Earthdata
+download redirects to a pre-signed URL, and following the chain on every request costs seconds each.
+Close it with `close`.
 """
 function nisar_file(path::AbstractString; transport = nothing)
     t = transport !== nothing ? transport :
         startswith(path, "s3://") ? S3Transport(first(split(path[6:end], '/'; limit = 2))) :
-        (startswith(path, "http://") || startswith(path, "https://")) ? HTTPTransport() :
+        (startswith(path, "http://") || startswith(path, "https://")) ? HTTPTransport(; resolve = true) :
         LocalTransport()
     return h5open_typed(path; transport = t)
 end
