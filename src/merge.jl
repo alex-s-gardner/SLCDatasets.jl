@@ -176,7 +176,8 @@ function _merge_extent(backends::AbstractVector)
     idx = [burst_index(b) for b in backends]
     expected = first(idx):(first(idx) + length(idx) - 1)
     idx == collect(expected) || throw(ArgumentError(
-        "the bursts given are $idx, which is not a consecutive ascending run. A merged subswath " *
+        "the bursts given are " * join(map(string, idx), ", ") * ", which is not a consecutive ascending " *
+        "run. A merged subswath " *
         "spans one unbroken range of bursts, since a gap would leave rows no burst covers and a " *
         "repeat would place one twice"))
     return swath, expected

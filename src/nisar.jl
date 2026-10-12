@@ -5,9 +5,9 @@
 # is read from the identification group and selects the reader, which is also how isce3's
 # `open_product` dispatches. A product whose type is `SLC` is an early-mission RSLC.
 #
-# A product is read through the Zarr group ChunkManifests.jl scans from it: every dataset with its
-# attributes and chunk locations, built from the file's metadata alone. The metadata below and the
-# samples are both read from that group, so a local file and a remote one take the same path.
+# A product is read through libhdf5 for its metadata — the few datasets below, by path — and through
+# ChunkManifests.jl's typed arrays for its samples, whose chunks are located once from the file's chunk index
+# and then read with range requests. A local file and a remote one take the same path.
 
 const SCIENCE_ROOT = "science"
 const SENSOR_BANDS = ("LSAR", "SSAR")
@@ -19,18 +19,31 @@ const SPEED_OF_LIGHT = 299792458.0
 """
     NisarBackend <: AbstractSLCBackend
 
-A NISAR-format HDF5 product: where it is, the sensor band group inside it, the product type, and the
-group scanned from it.
+A NISAR-format HDF5 product: where it is, the transport it is read through, the sensor band group inside
+it, and the product type.
 
 `frequency` selects the sub-band (`"A"` or `"B"`); a product lists the ones it carries at
 `identification/listOfFrequencies`.
+
+No file is held open: each read opens the product, reads what it needs and closes it, so a backend has no
+lifetime to manage. The samples are read through the transport alone once their chunks are located.
 """
 struct NisarBackend <: AbstractSLCBackend
     path::String
+    transport::LeafTransport
     band::String
     product_type::String
     frequency::String
-    group::Zarr.ZGroup
+end
+
+# `g(f)` with the product open as `f`, closed afterwards.
+function _with_file(g, b::NisarBackend)
+    f = h5open_typed(b.path; transport = b.transport)
+    try
+        return g(f)
+    finally
+        close(f)
+    end
 end
 
 product_path(b::NisarBackend) = string(SCIENCE_ROOT, "/", b.band, "/", b.product_type)
@@ -46,151 +59,131 @@ orbit_path(b::NisarBackend) = string(metadata_path(b), "/orbit")
 const GEOCODED_TYPES = ("GSLC", "GCOV", "GUNW", "GOFF")
 
 """
-    nisar_group(path; transport = nothing) -> Zarr.ZGroup
+    nisar_file(path; transport = nothing) -> ChunkManifests.H5File
 
-The product at `path` — a local file, an `https://` URL or an `s3://` URI — scanned into a Zarr group.
-Only the file's metadata is read; a remote file is read in place, through `transport` when one is given.
-
-A remote file is never downloaded instead: a NISAR granule is gigabytes, so where the loaded libhdf5
-cannot read one in place this throws, naming the version it needs.
+The product at `path` — a local file, an `https://` URL or an `s3://` URI — open for reading. Only the
+metadata a read touches is transferred; a remote file is read in place, through `transport` when one is
+given. Close it with `close`.
 """
-function nisar_group(path::AbstractString; transport = nothing)
-    occursin(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", path) || return scan(path; driver = HDF5Driver(), transport)
-    access = RangeAccess(; transport = something(transport, TransportContainers()))
-    return scan(path; driver = HDF5Driver(), access)
+function nisar_file(path::AbstractString; transport = nothing)
+    t = transport !== nothing ? transport :
+        startswith(path, "s3://") ? S3Transport(first(split(path[6:end], '/'; limit = 2))) :
+        (startswith(path, "http://") || startswith(path, "https://")) ? HTTPTransport() :
+        LocalTransport()
+    return h5open_typed(path; transport = t)
 end
 
 """
-    nisar_band(z) -> String
+    nisar_band(f) -> String
 
-The sensor band group of a scanned NISAR product: `"LSAR"` or `"SSAR"`.
+The sensor band group of an open NISAR product: `"LSAR"` or `"SSAR"`.
 """
-function nisar_band(z::Zarr.ZGroup)::String
-    haskey(z, SCIENCE_ROOT) || throw(ArgumentError(
-        "the product has no `/$SCIENCE_ROOT` group, so it is not a NISAR-format product"))
-    science = _group(z, SCIENCE_ROOT)
+function nisar_band(f::H5File)::String
+    h5_exists(f, SCIENCE_ROOT) || throw(ArgumentError(
+        "`$(f.uri)` has no `/$SCIENCE_ROOT` group, so it is not a NISAR-format product"))
     for band in SENSOR_BANDS
-        haskey(science, band) && return band
+        h5_exists(f, string(SCIENCE_ROOT, "/", band)) && return band
     end
-    throw(ArgumentError("the product has none of $(join(SENSOR_BANDS, ", ")) under " *
-                        "`/$SCIENCE_ROOT`, so it is not a NISAR-format product"))
+    throw(ArgumentError("`" * f.uri * "` has none of " * join(SENSOR_BANDS, ", ") * " under `/" * SCIENCE_ROOT *
+                        "`, so it is not a NISAR-format product"))
 end
 
-nisar_band(path::AbstractString) = nisar_band(nisar_group(path))
+nisar_band(path::AbstractString) = _with_path(nisar_band, path)
 
 """
-    nisar_product_type(z, band) -> String
+    nisar_product_type(f, band) -> String
 
-The product type recorded in a scanned NISAR product's identification group, as the group name that
-holds it. Early-mission products name the group `SLC` where later ones name it `RSLC`; both report
-`RSLC`.
+The product type recorded in an open NISAR product's identification group, as the group name that holds
+it. Early-mission products name the group `SLC` where later ones name it `RSLC`; both report `RSLC`.
 """
-function nisar_product_type(z::Zarr.ZGroup, band::AbstractString)::String
-    g = _group(z, string(SCIENCE_ROOT, "/", band))
-    haskey(g, "identification") || throw(ArgumentError(
-        "the product has no `identification` group under `/$SCIENCE_ROOT/$band`"))
-    declared = _text(g, "identification/productType")
+function nisar_product_type(f::H5File, band::AbstractString)::String
+    root = string(SCIENCE_ROOT, "/", band)
+    h5_exists(f, root * "/identification") || throw(ArgumentError(
+        "`$(f.uri)` has no `identification` group under `/$root`"))
+    declared = _text(f, root * "/identification/productType")
     # The declared type names the group except for the early-mission spelling.
-    declared == "SLC" && return haskey(g, "RSLC") ? "RSLC" : "SLC"
+    declared == "SLC" && return h5_exists(f, root * "/RSLC") ? "RSLC" : "SLC"
     return declared
 end
 
 nisar_product_type(path::AbstractString, band::AbstractString) =
-    nisar_product_type(nisar_group(path), band)
+    _with_path(f -> nisar_product_type(f, band), path)
 
-# A group or dataset reached from `parent` by a `/`-separated path, which Zarr.jl's own indexing does
-# not walk. Indexing a group gives back either kind, so the accessors below assert what the layout says a
-# name is: that keeps inference concrete and turns a product whose structure differs from the NISAR layout
-# into an error naming the path rather than a `MethodError` deeper in.
-
-function _node(parent::Zarr.ZGroup, name::AbstractString)
-    node = parent
-    for part in eachsplit(name, '/'; keepempty = false)
-        node isa Zarr.ZGroup && haskey(node, part) || throw(ArgumentError(
-            "`$name` is not under `/$(parent.path)`, so this is not a NISAR-format product"))
-        node = node[part]
-    end
-    return node
-end
-
-_haskey(parent::Zarr.ZGroup, name::AbstractString) =
+function _with_path(g, path::AbstractString)
+    f = nisar_file(path)
     try
-        _node(parent, name)
-        true
-    catch e
-        e isa ArgumentError || rethrow()
-        false
+        return g(f)
+    finally
+        close(f)
     end
-
-@noinline _not_a(kind, parent, name) = throw(ArgumentError(
-    "`$name` under `/$(parent.path)` is not a $kind, so this is not a NISAR-format product"))
-
-function _dataset(parent::Zarr.ZGroup, name::AbstractString)
-    d = _node(parent, name)
-    d isa Zarr.ZArray || _not_a("dataset", parent, name)
-    return d
 end
 
-function _group(parent::Zarr.ZGroup, name::AbstractString)
-    g = _node(parent, name)
-    g isa Zarr.ZGroup || _not_a("group", parent, name)
-    return g
+# The accessors below read a dataset by its full path and convert to the type the layout calls for, so a
+# product storing a count as `Int32` or times as `Float32` is read correctly here; libhdf5 converts as it
+# reads. A dataset missing from the layout is an error naming the path.
+
+function _require(f::H5File, name::AbstractString)
+    h5_exists(f, name) || throw(ArgumentError(
+        "`/$name` is not in `$(f.uri)`, so this is not a NISAR-format product"))
+    h5_isgroup(f, name) && throw(ArgumentError(
+        "`/$name` in `$(f.uri)` is a group where a dataset belongs, so this is not a NISAR-format product"))
+    return String(name)
 end
 
-# A dataset's whole contents: the value of a zero-dimensional one, an array otherwise.
-_read(d::Zarr.ZArray) = ndims(d) == 0 ? d[] : d[ntuple(_ -> Colon(), ndims(d))...]
-
-# Each accessor below converts to the type the layout calls for and annotates that, which keeps inference
-# concrete through the arithmetic that follows. The conversion is explicit, so a product storing a count as
-# `Int32` or times as `Float32` is read correctly here.
-
-# A dataset's value where only a scalar is wanted.
-_scalar(parent, name::AbstractString)::Float64 = _only_number(_dataset(parent, name))
+# A dataset's value where only a scalar is wanted: a zero-dimensional or one-element dataset.
+function _scalar(f::H5File, name::AbstractString)::Float64
+    v = h5_read(f, _require(f, name), Float64)
+    length(v) == 1 || throw(ArgumentError(
+        "`/$name` holds $(length(v)) values where one is expected, so this is not a NISAR-format product"))
+    return v[1]
+end
 
 # A whole-number field, stored variously as an integer or a float across product generations.
-function _scalar_int(parent, name::AbstractString)
-    d = _dataset(parent, name)
-    v = _only_number(d)
+function _scalar_int(f::H5File, name::AbstractString)
+    v = _scalar(f, name)
     isinteger(v) || throw(ArgumentError(
-        "`/$(d.path)` holds $v where a whole number is expected, so this is not a " *
-        "NISAR-format product"))
+        "`/$name` holds $v where a whole number is expected, so this is not a NISAR-format product"))
     return Int(v)
 end
 
-# A scalar dataset holds a number, a zero-dimensional array, or a one-element one depending on how the
-# product was written; `only` covers the arrays and the bare number falls through.
-_only_number(d)::Float64 = _as_number(_read(d))
-_as_number(x::Number) = Float64(x)
-_as_number(x::AbstractArray) = Float64(only(x))
-
-# A fixed-length string dataset; `_string` narrows it and strips the NUL padding.
-_text(parent, name::AbstractString)::String = _string(_read(_dataset(parent, name)))
+# A string dataset holding one string.
+function _text(f::H5File, name::AbstractString)::String
+    v = h5_read_strings(f, _require(f, name))
+    length(v) == 1 || throw(ArgumentError(
+        "`/$name` holds $(length(v)) strings where one is expected, so this is not a NISAR-format product"))
+    return v[1]
+end
 
 # The first and last element of a one-dimensional dataset, and its length. Reading the dataset whole
 # would transfer the entire axis — 27,000 azimuth times for a real RSLC — where only the ends are used.
-function _axis_bounds(parent, name::AbstractString)
-    d = _dataset(parent, name)
-    n = length(d)
-    n > 0 || throw(ArgumentError("`/$(d.path)` is empty, so it has no bounds"))
-    return _as_number(d[1]), _as_number(d[n]), n
+function _axis_bounds(f::H5File, name::AbstractString)
+    p = _require(f, name)
+    dims = h5_dims(f, p)
+    length(dims) == 1 || throw(ArgumentError("`/$name` is not one-dimensional"))
+    n = dims[1]
+    n > 0 || throw(ArgumentError("`/$name` is empty, so it has no bounds"))
+    ends = h5_read_elements(f, p, Float64, [0, n - 1])
+    return ends[1], ends[2], n
 end
 
-function _units_epoch(parent, name::AbstractString)
-    d = _dataset(parent, name)
-    haskey(d.attrs, "units") || throw(ArgumentError(
-        "`/$(d.path)` has no `units` attribute, so the epoch its times are measured from is unknown"))
-    return parse_cf_epoch(_string(d.attrs["units"]))
+function _units_epoch(f::H5File, name::AbstractString)
+    u = h5_attr_string(f, _require(f, name), "units")
+    u === nothing && throw(ArgumentError(
+        "`/$name` has no `units` attribute, so the epoch its times are measured from is unknown"))
+    return parse_cf_epoch(u)
 end
 
-function read_identification(b::NisarBackend)
-    g = _group(b.group, identification_path(b))
+read_identification(b::NisarBackend) = _with_file(f -> read_identification(b, f), b)
+
+function read_identification(b::NisarBackend, f::H5File)
+    g = identification_path(b)
     # An absent optional field reads as empty rather than failing: a product missing one is still
     # usable, where one missing `absoluteOrbitNumber` is not.
-    get_str(name)::String = haskey(g, name) ? _text(g, name) : ""
+    get_str(name)::String = h5_exists(f, g * "/" * name) ? _text(f, g * "/" * name) : ""
     return Identification(
         get_str("missionId"),
         get_str("productType"),
-        _scalar_int(g, "absoluteOrbitNumber"),
+        _scalar_int(f, g * "/absoluteOrbitNumber"),
         get_str("orbitPassDirection"),
         get_str("lookDirection"),
         get_str("zeroDopplerStartTime"),
@@ -199,19 +192,20 @@ function read_identification(b::NisarBackend)
     )
 end
 
-function read_geometry(b::NisarBackend)
+read_geometry(b::NisarBackend) = _with_file(f -> read_geometry(b, f), b)
+
+function read_geometry(b::NisarBackend, f::H5File)
     b.product_type in GEOCODED_TYPES && throw(ArgumentError(
         "`$(b.path)` is a $(b.product_type) product, which stores its samples on a map grid and so " *
         "carries no slant-range/azimuth geometry. This package reads SLCs in radar geometry; open an " *
         "RSLC, or use a raster library for a geocoded product"))
-    freq = _group(b.group, frequency_path(b))
-    swaths = _group(b.group, swath_path(b))
-    ident = _group(b.group, identification_path(b))
+    freq = frequency_path(b)
+    swaths = swath_path(b)
 
-    near_range, far_range, nsamples = _axis_bounds(freq, "slantRange")
-    sensing_start, sensing_stop, nlines = _axis_bounds(swaths, "zeroDopplerTime")
+    near_range, far_range, nsamples = _axis_bounds(f, freq * "/slantRange")
+    sensing_start, sensing_stop, nlines = _axis_bounds(f, swaths * "/zeroDopplerTime")
 
-    look = _text(ident, "lookDirection")
+    look = _text(f, identification_path(b) * "/lookDirection")
     side = lowercase(look) == "left" ? LookLeft :
            lowercase(look) == "right" ? LookRight :
            throw(ArgumentError(
@@ -220,9 +214,9 @@ function read_geometry(b::NisarBackend)
     return RadarGeometry(
         near_range,
         far_range,
-        _scalar(freq, "slantRangeSpacing"),
-        SPEED_OF_LIGHT / _scalar(freq, "processedCenterFrequency"),
-        1 / _scalar(swaths, "zeroDopplerTimeSpacing"),
+        _scalar(f, freq * "/slantRangeSpacing"),
+        SPEED_OF_LIGHT / _scalar(f, freq * "/processedCenterFrequency"),
+        1 / _scalar(f, swaths * "/zeroDopplerTimeSpacing"),
         sensing_start,
         sensing_stop,
         nlines,
@@ -230,45 +224,41 @@ function read_geometry(b::NisarBackend)
         side,
         # The azimuth times and the orbit's state vector times share one epoch in this format, so the
         # epoch is read once here and reported for both.
-        _units_epoch(swaths, "zeroDopplerTime"),
+        _units_epoch(f, swaths * "/zeroDopplerTime"),
     )
 end
 
-function read_orbit(b::NisarBackend)
-    g = _group(b.group, orbit_path(b))
-    time = _read_vector(g, "time")
-    # Stored (N, 3) row-major, which Zarr.jl presents as (3, N).
-    pos = _read_matrix(g, "position")
-    vel = _read_matrix(g, "velocity")
-    size(pos, 1) == 3 || throw(ArgumentError(
-        "orbit position in `$(b.path)` has leading dimension $(size(pos, 1)), expected 3"))
-    axes(pos) == axes(vel) || throw(DimensionMismatch(
-        "orbit position and velocity in `$(b.path)` have axes $(axes(pos)) and $(axes(vel))"))
-    size(pos, 2) == length(time) || throw(DimensionMismatch(
-        "orbit in `$(b.path)` has $(length(time)) times but $(size(pos, 2)) state vectors"))
-    get_str(name, default)::String = haskey(g, name) ? _text(g, name) : default
+read_orbit(b::NisarBackend) = _with_file(f -> read_orbit(b, f), b)
+
+function read_orbit(b::NisarBackend, f::H5File)
+    g = orbit_path(b)
+    time = h5_read(f, _require(f, g * "/time"), Float64)
+    pos = _state_vectors(f, g * "/position")
+    vel = _state_vectors(f, g * "/velocity")
+    length(pos) == length(vel) || throw(DimensionMismatch(
+        "orbit in `$(b.path)` has $(length(pos)) positions but $(length(vel)) velocities"))
+    length(pos) == length(time) || throw(DimensionMismatch(
+        "orbit in `$(b.path)` has $(length(time)) times but $(length(pos)) state vectors"))
+    get_str(name, default)::String = h5_exists(f, g * "/" * name) ? _text(f, g * "/" * name) : default
     return StateVectors(
         time,
-        _columns_as_svectors(pos),
-        _columns_as_svectors(vel),
-        _units_epoch(g, "time"),
+        pos,
+        vel,
+        _units_epoch(f, g * "/time"),
         get_str("interpMethod", "Hermite"),
         get_str("orbitType", "Custom"),
     )
 end
 
-# A product may store these as `Float32`, so the element type is converted rather than propagated into
-# `StateVectors`, whose fields are `Float64`. `convert` is a no-op when the file already holds `Float64`.
-_read_vector(parent, name::AbstractString)::Vector{Float64} =
-    convert(Vector{Float64}, _read(_dataset(parent, name))::AbstractVector)
-
-_read_matrix(parent, name::AbstractString)::Matrix{Float64} =
-    convert(Matrix{Float64}, _read(_dataset(parent, name))::AbstractMatrix)
-
-# The (3, N) array Zarr.jl hands back, as N 3-vectors.
-function _columns_as_svectors(a::AbstractMatrix{Float64})
-    Base.require_one_based_indexing(a)
-    return [SVector{3,Float64}(a[1, i], a[2, i], a[3, i]) for i in axes(a, 2)]
+# An (N, 3) dataset of state vectors, as N 3-vectors. HDF5 stores it row-major, so each vector's three
+# components are adjacent.
+function _state_vectors(f::H5File, name::AbstractString)
+    p = _require(f, name)
+    dims = h5_dims(f, p)
+    (length(dims) == 2 && dims[2] == 3) || throw(ArgumentError(
+        "`/$name` has dimensions $(join(dims, " x ")), expected N x 3"))
+    v = h5_read(f, p, Float64)
+    return [SVector{3,Float64}(v[3i - 2], v[3i - 1], v[3i]) for i in 1:dims[1]]
 end
 
 # ---------------------------------------------------------------------------
@@ -278,10 +268,11 @@ end
 """
     NisarRaster{T}
 
-A NISAR product's sample array: its scanned Zarr array, permuted to `(line, sample)`.
+A NISAR product's sample array: its dataset as a ChunkManifests.jl typed array, permuted to
+`(line, sample)`. The samples are read as `ComplexF32`.
 
 **The file's layout is the transpose of Julia's.** A NISAR image is stored row-major with azimuth (or
-northing) slowest, so Zarr.jl reports it as `(range, azimuth)`; this reverses that, so indexing is
+northing) slowest, so the typed array is `(range, azimuth)`; this reverses that, so indexing is
 `(line, sample)` for a radar-geometry product and `(northing, easting)` for a geocoded one — the order
 every other array in this package uses.
 
@@ -290,10 +281,10 @@ Nothing is held: an RSLC band is 50511 x 57760 `ComplexF32` and a GSLC band 1612
 the chunks it touches, `eachchunk` reports the dataset's own storage chunks, and concurrent reads from
 several tasks are safe. A chunk an unwritten region never allocated reads as the dataset's fill value.
 """
-const NisarRaster{T} = DiskArrays.PermutedDiskArray{T,2,(2, 1),(2, 1),<:Zarr.ZArray{T,2}}
+const NisarRaster{T} = DiskArrays.PermutedDiskArray{T,2,(2, 1),(2, 1),TypedArray{T}}
 
 """
-    nisar_samples_path(b::NisarBackend, polarization = nothing) -> String
+    nisar_samples_path(b::NisarBackend, f, polarization = nothing) -> String
 
 Where `b`'s polarization's samples live: under `swaths` for a radar-geometry product, `grids` for a
 geocoded one.
@@ -301,25 +292,29 @@ geocoded one.
 The polarization is the first this frequency lists, which is the only one a single-polarization product
 carries and the co-polarized channel of a dual one.
 """
-function nisar_samples_path(b::NisarBackend, polarization = nothing)
+function nisar_samples_path(b::NisarBackend, f::H5File, polarization = nothing)
     group = b.product_type in GEOCODED_TYPES ? "grids" : "swaths"
     base = string(product_path(b), "/", group, "/frequency", b.frequency)
-    g = _group(b.group, base)
-    listed() = String[_string(p) for p in _read(_dataset(g, "listOfPolarizations"))]
+    h5_isgroup(f, base) || throw(ArgumentError(
+        "`/$base` is not a group in `$(f.uri)`, so this is not a NISAR-format product"))
+    listing = base * "/listOfPolarizations"
+    listed() = h5_read_strings(f, listing)
     pol = if polarization === nothing
-        haskey(g, "listOfPolarizations") || throw(ArgumentError(
+        h5_exists(f, listing) || throw(ArgumentError(
             "`$(b.path)` lists no polarizations under $base"))
         first(listed())
     else
         String(polarization)
     end
-    haskey(g, pol) || throw(ArgumentError(
+    h5_exists(f, base * "/" * pol) || throw(ArgumentError(
         "`$(b.path)` has no $pol under $base; it lists " * join(listed(), ", ")))
     return string(base, "/", pol)
 end
 
-NisarRaster(b::NisarBackend, polarization = nothing) =
-    permutedims(_dataset(b.group, nisar_samples_path(b, polarization)), (2, 1))
+NisarRaster(b::NisarBackend, polarization = nothing) = _with_file(f -> NisarRaster(b, f, polarization), b)
+
+NisarRaster(b::NisarBackend, f::H5File, polarization = nothing) =
+    permutedims(h5_open_array(f, nisar_samples_path(b, f, polarization), ComplexF32), (2, 1))
 
 read_pixels(b::NisarBackend) = NisarRaster(b)
 
@@ -363,17 +358,18 @@ end
 
 The map grid of a geocoded product's frequency group.
 """
-function geocoded_grid(b::NisarBackend)
+geocoded_grid(b::NisarBackend) = _with_file(f -> geocoded_grid(b, f), b)
+
+function geocoded_grid(b::NisarBackend, f::H5File)
     b.product_type in GEOCODED_TYPES || throw(ArgumentError(
         "`$(b.path)` is a $(b.product_type) product, which lies in radar geometry and so has no map " *
         "grid; `read_geometry` describes it instead"))
-    g = _group(b.group, string(product_path(b), "/grids/frequency", b.frequency))
-    x = _dataset(g, "xCoordinates")
-    y = _dataset(g, "yCoordinates")
-    dx = _scalar(g, "xCoordinateSpacing")
-    dy = _scalar(g, "yCoordinateSpacing")
-    return GeocodedGrid((Float64(x[1]) - dx / 2, Float64(y[1]) - dy / 2), (dx, dy),
-                        (length(y), length(x)), _scalar_int(g, "projection"))
+    g = string(product_path(b), "/grids/frequency", b.frequency)
+    x0, _, nx = _axis_bounds(f, g * "/xCoordinates")
+    y0, _, ny = _axis_bounds(f, g * "/yCoordinates")
+    dx = _scalar(f, g * "/xCoordinateSpacing")
+    dy = _scalar(f, g * "/yCoordinateSpacing")
+    return GeocodedGrid((x0 - dx / 2, y0 - dy / 2), (dx, dy), (ny, nx), _scalar_int(f, g * "/projection"))
 end
 
 """
@@ -388,10 +384,11 @@ What they do carry is a map grid and samples, which is what this returns.
 open_geocoded(path::AbstractString; frequency = nothing) = open_geocoded(source_for(path); frequency)
 
 function open_geocoded(src::AbstractSLCSource; frequency = nothing)
-    b = _nisar_backend(src; frequency)
-    b.product_type in GEOCODED_TYPES || throw(ArgumentError(
-        "`$(b.path)` is a $(b.product_type) product, which lies in radar geometry; use `open_slc`"))
-    return GeocodedProduct(b, read_identification(b), geocoded_grid(b))
+    return _with_nisar(src; frequency) do b, f
+        b.product_type in GEOCODED_TYPES || throw(ArgumentError(
+            "`$(b.path)` is a $(b.product_type) product, which lies in radar geometry; use `open_slc`"))
+        GeocodedProduct(b, read_identification(b, f), geocoded_grid(b, f))
+    end
 end
 
 grid(g::GeocodedProduct) = g.grid

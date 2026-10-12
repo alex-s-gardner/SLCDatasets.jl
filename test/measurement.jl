@@ -50,23 +50,23 @@ end
     mktempdir() do dir
         pixels = tiff_pattern(4, 5)
 
-        @test_throws "LZW" open_measurement(
+        @test_throws "TIFF compression 5 is not read" open_measurement(
             write_tiff(joinpath(dir, "lzw.tiff"), pixels; compression = 5))
 
-        @test_throws "opposite byte order" open_measurement(
+        @test_throws "big-endian" open_measurement(
             write_tiff(joinpath(dir, "be.tiff"), pixels; bigendian = true))
 
-        @test_throws "holds Float32 samples" open_measurement(
+        @test_throws "32-bit samples of TIFF sample format 3" open_measurement(
             write_tiff(joinpath(dir, "float.tiff"), pixels; sample_format = 3))
 
-        @test_throws "holds Complex{Int8} samples" open_measurement(
+        @test_throws "16-bit samples of TIFF sample format 5" open_measurement(
             write_tiff(joinpath(dir, "bits.tiff"), pixels; bits_per_sample = 16))
 
-        @test_throws "one sample per pixel" open_measurement(
+        @test_throws "has 3 bands" open_measurement(
             write_tiff(joinpath(dir, "bands.tiff"), pixels; samples_per_pixel = 3))
 
         # A strip table shorter than the raster is tall leaves lines unaddressed.
-        @test_throws "strip offsets" open_measurement(
+        @test_throws "lists 2 chunks for a 1×4 grid" open_measurement(
             write_tiff(joinpath(dir, "short.tiff"), pixels; nstrips = 2))
     end
 end

@@ -8,6 +8,7 @@
 
 using SLCDatasets
 using SLCDatasets: localpath, source_for, source_uri, source_transport, _netrc_login, _earthdata_host
+using Base64: base64encode
 using ChunkManifests: HTTPTransport
 using HTTP
 using Test
@@ -117,7 +118,7 @@ end
     seen = Ref("")
     edl = HTTP.serve!("127.0.0.1", 0) do req
         seen[] = HTTP.header(req, "Authorization", "")
-        seen[] == "Basic " * SLCDatasets.base64encode("me:s3cret") ?
+        seen[] == "Basic " * base64encode("me:s3cret") ?
             HTTP.Response(200, "{\"access_token\":\"tok-1\",\"token_type\":\"Bearer\"}") :
             HTTP.Response(401, "bad credentials")
     end

@@ -137,13 +137,30 @@ function earthdata_token(netrc::AbstractString = joinpath(homedir(), ".netrc"); 
         creds === nothing && throw(ArgumentError(
             "`$netrc` has no `machine $EDL_HOST login … password …` entry, so no Earthdata Login " *
             "token can be obtained from it. Add one, or pass `token` or set EARTHDATA_TOKEN"))
-        r = HTTP.post(url, ["Authorization" => "Basic " * base64encode(join(creds, ':'))];
-                      status_exception = false)
-        r.status == 200 || throw(ErrorException(
-            "Earthdata Login refused the credentials in `$netrc` for a token: HTTP $(r.status)"))
-        m = match(r"\"access_token\"\s*:\s*\"([^\"]+)\"", String(r.body))
+        status, body = http_request(url; method = "POST",
+                                    headers = ["Authorization: Basic " * _base64(creds[1] * ":" * creds[2])])
+        status == 200 || throw(ErrorException(
+            "Earthdata Login refused the credentials in `$netrc` for a token: HTTP $status"))
+        m = match(r"\"access_token\"\s*:\s*\"([^\"]+)\"", String(body))
         m === nothing && throw(ErrorException(
             "Earthdata Login answered without an access token, so none could be obtained"))
         String(m[1])
     end
+end
+
+const _BASE64_ALPHABET = codeunits("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+# Standard base64 with padding (RFC 4648 §4), for the Basic credentials header.
+function _base64(s::String)
+    src = codeunits(s)
+    out = UInt8[]
+    sizehint!(out, 4 * cld(length(src), 3))
+    for i in 1:3:length(src)
+        n = length(src) - i + 1
+        b = UInt32(src[i]) << 16 | (n > 1 ? UInt32(src[i + 1]) << 8 : 0x0) | (n > 2 ? UInt32(src[i + 2]) : 0x0)
+        for k in 0:3
+            push!(out, k <= min(n, 3) ? _BASE64_ALPHABET[((b >> (18 - 6k)) & 0x3f) + 1] : UInt8('='))
+        end
+    end
+    return String(out)
 end

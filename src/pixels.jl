@@ -1,8 +1,7 @@
 # Reaching an acquisition's samples, and the amplitude of them.
 #
-# Reading samples is not something every product this package opens can do: a Sentinel-1 product read
-# from a zip cannot reach its raster at all — the entry is deflated, so a line is not addressable without
-# inflating everything before it — and a product rebuilt from metadata alone has no sample array to read.
+# Reading samples is not something every product this package opens can do: a product rebuilt from metadata
+# alone has no sample array to read.
 # So `pixels` is a backend method a backend may not have, and a backend without one says why rather than
 # raising a `MethodError` naming an internal type.
 #

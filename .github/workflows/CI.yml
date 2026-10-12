@@ -23,7 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         version:
-          - 'lts'
+          # 1.11 rather than the LTS: ChunkManifests and its Zarr.jl branch resolve only through
+          # `[sources]`, which Pkg ignores before 1.11.
+          - '1.11'
           - '1'
           - 'pre'
         os:

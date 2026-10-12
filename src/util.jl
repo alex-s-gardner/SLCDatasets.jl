@@ -1,9 +1,9 @@
-# Every scalar string in a NISAR product is stored as fixed-length bytes, which Zarr.jl surfaces as a
-# fixed-width string type, or as a character for a one-byte string. Trailing NULs are padding.
+# Strings read from a product — attributes, and the scalar strings of a NISAR product, stored as
+# fixed-length bytes — may carry trailing NULs as padding.
 #
-# The return type is annotated because the callers pass the result of a read whose type is only known
-# once the product is open: without it every string field of a product would infer as `Any` and each
-# use of one would dispatch at runtime.
+# The return type is annotated because some callers pass a value whose type is only known once the
+# product is read: without it a string field would infer as `Any` and each use of one would dispatch at
+# runtime.
 _string(x::String)::String = String(rstrip(x, '\0'))
 _string(x::AbstractString)::String = _string(String(x))
 _string(x::AbstractVector{UInt8})::String = _string(String(x))

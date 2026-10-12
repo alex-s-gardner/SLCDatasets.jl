@@ -115,7 +115,7 @@ keeping the strict minimum does.
 """
 function nearest_polynomial(polys::AbstractVector{RangePolynomial}, t::UtcTime)
     isempty(polys) && throw(ArgumentError(
-        "the annotation lists no polynomials, so none can be selected for $t"))
+        "the annotation lists no polynomials, so none can be selected for " * _utc_string(t)))
     best = firstindex(polys)
     best_dt = abs(seconds_between(polys[best].time, t))
     for i in Iterators.drop(eachindex(polys), 1)

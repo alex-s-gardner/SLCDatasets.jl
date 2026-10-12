@@ -50,29 +50,53 @@ function open_slc(src::AbstractSLCSource; frequency = nothing, orbit = nothing,
         return _open_sentinel1(path; orbit, swath, swaths, burst, polarization)
     end
     isfile(path) || throw(ArgumentError("`$path` is not a readable file"))
-    ishdf5(path) || throw(ArgumentError(
+    _ishdf5(path) || throw(ArgumentError(
         "`$path` is neither an HDF5 file nor a Sentinel-1 SAFE product; those are the only " *
         "formats currently read"))
     return _open_nisar(src; frequency)
 end
 
-# A remote product is a NISAR one: a Sentinel-1 raster is only read from an unpacked `.SAFE`.
-open_slc(src::Union{RemoteHTTP,RemoteS3}; frequency = nothing) = _open_nisar(src; frequency)
-
-function _open_nisar(src::AbstractSLCSource; frequency)
-    backend = _nisar_backend(src; frequency)
-    return SLC(backend, read_identification(backend), read_geometry(backend))
+# A remote product is a NISAR granule, or a zipped Sentinel-1 product read in place.
+function open_slc(src::Union{RemoteHTTP,RemoteS3}; frequency = nothing, orbit = nothing, swath = nothing,
+                  swaths = nothing, burst = nothing, polarization = nothing)
+    uri = source_uri(src)
+    endswith(lowercase(uri), ".zip") && return _open_sentinel1(uri; orbit, swath, swaths, burst, polarization)
+    return _open_nisar(src; frequency)
 end
 
-# The one scan of a product that the band probe, the type dispatch, the frequency default and every
-# metadata and sample read then share.
-function _nisar_backend(src::AbstractSLCSource; frequency)
+_open_nisar(src::AbstractSLCSource; frequency) =
+    _with_nisar((b, f) -> SLC(b, read_identification(b, f), read_geometry(b, f)), src; frequency)
+
+# `g(backend, f)` with the product open as `f`: one open for the band probe, the type dispatch, the frequency
+# default and whatever `g` reads, closed afterwards.
+function _with_nisar(g, src::AbstractSLCSource; frequency)
     path = source_uri(src)
-    z = nisar_group(path; transport = source_transport(src))
-    band = nisar_band(z)
-    product_type = nisar_product_type(z, band)
-    freq = frequency === nothing ? default_frequency(z, band) : String(frequency)
-    return NisarBackend(path, band, product_type, freq, z)
+    f = nisar_file(path; transport = source_transport(src))
+    try
+        band = nisar_band(f)
+        product_type = nisar_product_type(f, band)
+        freq = frequency === nothing ? default_frequency(f, band) : String(frequency)
+        return g(NisarBackend(path, f.transport, band, product_type, freq), f)
+    finally
+        close(f)
+    end
+end
+
+# The HDF5 signature, which a file carries at byte 0 or at 512, 1024, 2048, … when a user block precedes
+# the superblock.
+const _HDF5_SIGNATURE = UInt8[0x89, 0x48, 0x44, 0x46, 0x0d, 0x0a, 0x1a, 0x0a]
+
+function _ishdf5(path::AbstractString)
+    open(path) do io
+        n = filesize(io)
+        at = 0
+        while at + 8 <= n
+            seek(io, at)
+            read(io, 8) == _HDF5_SIGNATURE && return true
+            at = at == 0 ? 512 : 2at
+        end
+        return false
+    end
 end
 
 function _open_sentinel1(path::AbstractString; orbit, swath, swaths, burst, polarization)
@@ -172,14 +196,14 @@ function source_for(spec::AbstractString)
 end
 
 """
-    default_frequency(z, band) -> String
+    default_frequency(f, band) -> String
 
-The first sub-band a scanned NISAR product lists, as the one to read when the caller names none.
+The first sub-band an open NISAR product lists, as the one to read when the caller names none.
 """
-function default_frequency(z::Zarr.ZGroup, band::AbstractString)::String
+function default_frequency(f::H5File, band::AbstractString)::String
     name = string(SCIENCE_ROOT, "/", band, "/identification/listOfFrequencies")
-    _haskey(z, name) || return "A"
-    listed = _read(_dataset(z, name))
+    h5_exists(f, name) || return "A"
+    listed = h5_read_strings(f, name)
     isempty(listed) && throw(ArgumentError("the product lists no frequencies"))
-    return _string(first(listed))
+    return first(listed)
 end

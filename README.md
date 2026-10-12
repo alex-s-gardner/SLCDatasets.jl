@@ -148,9 +148,11 @@ Samples are read as they are indexed, so a subswath costs the windows taken from
 Index with ranges where the shape of the read allows — a window is one read per burst it spans, about
 four times faster per sample than resolving a row at a time.
 
-Pixels need an unpacked `.SAFE`. Inside a zip the raster is deflated, so a line is not addressable
-without inflating everything before it; `pixels` says so and names unpacking as the fix. Reading a
-zipped product's metadata is unaffected.
+A zip stores each raster deflated, so a line is not addressable without inflating everything before it.
+A zipped product — local, over HTTP(S) or in S3 — therefore has its rasters inflated whole into a directory
+(`Sentinel1Product(zip; orbit, dir)`, a temporary one by default) the first time its samples are read:
+every subswath it was opened for at once, so a remote archive is read through several streams and each
+member's bytes cross the network once. Reading a zipped product's metadata reads only the annotations.
 
 ### Bursts from ASF
 
@@ -163,14 +165,26 @@ ref = merge_bursts(b)
 ```
 
 Bursts are numbered from 1 here as everywhere else in this package, and the conversion to the
-extractor's 0-based URLs happens inside. Authentication is from `~/.netrc`. The
-extractor builds a burst on first request and answers `202` until it is ready, which is retried; `dir`
-is where the files are kept, and one already there is not fetched again.
+extractor's 0-based URLs happens inside; `AsfBurst(url)` reads a burst from the URL ASF's search lists
+for it. Authentication is from `~/.netrc`. The extractor builds a burst on first request and answers
+`202` until it is ready, which is retried. A burst's metadata — its parent product's whole annotation —
+is held in memory, and its raster downloaded into `dir`, where one already there is not fetched again.
 
 A merge of ASF bursts and a merge of the same bursts from a `.SAFE` give the same array — verified
 sample for sample, including across seams — so which delivery format you have does not change what you
 read. What differs is that each ASF file holds one burst, where a `.SAFE` raster holds a subswath's
 bursts stacked.
+
+A set of bursts, from one or more subswaths and from consecutive products of one datatake, also opens as
+the product [burst2safe](https://github.com/ASFHyP3/burst2safe) assembles from them:
+
+```julia
+bs = [AsfBurst(url; dir = "bursts") for url in urls]
+p = Sentinel1Product(bs; orbit = eof)      # the subswaths the bursts lie in
+p.path                                     # the SAFE's name, e.g. S1A_IW_SLC__1SSV_..._069D69_0000
+```
+
+Its annotations and stacked rasters equal those of the SAFE `burst2safe` writes from the same bursts.
 
 ### A `Sentinel1Product`
 

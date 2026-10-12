@@ -199,8 +199,8 @@ if !isempty(S1_PRODUCTS)
         pol = String(p.gold.polarization)
         m = merge_bursts(bursts(p.safe; orbit = p.eof, swath = 2, polarization = pol))
         if !isdir(p.safe)
-            # A zipped product: the raster is deflated inside it, so a window is not addressable.
-            @test_throws "zipped Sentinel-1 product" pixels(m)
+            # A zipped product's raster is a deflated member, read a window at a time through its index.
+            @test size(pixels(m)[1:4, 1:4]) == (4, 4)
         else
             # The rebuilt fixture carries annotation only.
             @test_throws "annotation only" pixels(m)

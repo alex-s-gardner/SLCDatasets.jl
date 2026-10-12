@@ -95,8 +95,17 @@ A residual carried past one second reads as the time it denotes rather than as a
 function _utc_string(t::UtcTime)
     extra = floor(Int, t.seconds)
     frac = t.seconds - extra
-    stamp = Dates.format(t.datetime + Dates.Second(extra), "yyyy-mm-ddTHH:MM:SS")
-    return string(stamp, ".", lpad(round(Int, frac * 1_000_000), 6, '0'))
+    d = t.datetime + Dates.Second(extra)
+    return _zpad(Dates.year(d), 4) * "-" * _zpad(Dates.month(d), 2) * "-" * _zpad(Dates.day(d), 2) * "T" *
+           _zpad(Dates.hour(d), 2) * ":" * _zpad(Dates.minute(d), 2) * ":" * _zpad(Dates.second(d), 2) * "." *
+           _zpad(round(Int, frac * 1_000_000), 6)
+end
+
+# `n` in decimal, zero-padded to `width` digits. Written out because `lpad` measures its padding with
+# `textwidth`.
+function _zpad(n::Int, width::Int)
+    s = string(n)
+    return ncodeunits(s) >= width ? s : String(fill(UInt8('0'), width - ncodeunits(s))) * s
 end
 
 # A trailing zone designator, if any, starts here. These products are UTC and `DateTime` carries no
@@ -106,8 +115,11 @@ function _strip_zone(s::AbstractString)
     isempty(t) && return SubString(t, 1, 0)
     (t[end] == 'Z' || t[end] == 'z') && return SubString(t, 1, prevind(t, lastindex(t)))
     # A `+hh:mm`/`-hhmm` offset, distinguished from the date's own hyphens by lying past the time.
-    k = findlast(c -> c == '+' || c == '-', t)
-    (k !== nothing && k > 11) && return SubString(t, 1, prevind(t, k))
+    k = lastindex(t)
+    while k >= firstindex(t) && !(t[k] == '+' || t[k] == '-')
+        k = prevind(t, k)
+    end
+    k > 11 && return SubString(t, 1, prevind(t, k))
     return SubString(t, 1, lastindex(t))
 end
 

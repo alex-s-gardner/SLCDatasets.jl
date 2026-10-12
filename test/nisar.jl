@@ -331,9 +331,9 @@ end
         @test touched(1:16, 1:10) == 4            # two chunk rows by two chunk columns, on the boundary
         @test touched(5:20, 3:12) == 9            # the same extent, straddling both axes
 
-        # An unchunked dataset is one chunk spanning it.
+        # An unchunked (contiguous) dataset is read a line at a time: one chunk per line.
         q = pixels(open_slc(plain))
-        @test size(DiskArrays.eachchunk(q)) == (1, 1)
+        @test size(DiskArrays.eachchunk(q)) == (size(q, 1), 1)
 
         # Indexing forms `DiskArrays` provides on top of `readblock!`, none of them defined here.
         for r in (p, q)
@@ -356,7 +356,7 @@ end
         # reports `DiskArrays`' fallback for a plain array and a caller sees no boundaries to align to.
         @test DiskArrays.haschunks(amplitude(p)) === DiskArrays.Chunked()
         @test map(length, first(DiskArrays.eachchunk(amplitude(p)))) == (8, 5)
-        @test size(DiskArrays.eachchunk(amplitude(q))) == (1, 1)
+        @test size(DiskArrays.eachchunk(amplitude(q))) == (size(q, 1), 1)
         # An in-memory parent keeps the fallback rather than claiming storage chunks it does not have.
         @test DiskArrays.haschunks(amplitude(A)) === DiskArrays.Unchunked()
     end
