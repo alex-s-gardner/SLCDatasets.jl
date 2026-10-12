@@ -8,7 +8,7 @@
 #
 # `reference/extract_sentinel1_inputs.jl` is what produced these files.
 
-using JSON3
+using JSON
 
 # The golden-value files, each naming the granule its values were dumped from.
 const S1_GOLDEN = ["sentinel1_metadata.json", "sentinel1_metadata_s1b.json"]
@@ -147,8 +147,8 @@ function s1_fixtures()
         input_file = joinpath(@__DIR__, "reference", replace(name, "_metadata" => "_inputs"))
         (isfile(gold_file) && isfile(input_file)) || continue
         push!(out, (; name,
-                    gold = JSON3.read(read(gold_file, String)),
-                    inputs = JSON3.read(read(input_file, String), Dict{String,Any})))
+                    gold = JSON.parse(read(gold_file, String)),
+                    inputs = JSON.parse(read(input_file, String); dicttype = Dict{String,Any})))
     end
     return out
 end

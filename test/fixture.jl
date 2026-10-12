@@ -6,10 +6,10 @@
 # gigabyte file or a network.
 
 using HDF5
-using JSON3
+using JSON
 using SLCDatasets: SPEED_OF_LIGHT
 
-const FIXTURE = JSON3.read(read(joinpath(@__DIR__, "reference", "nisar_metadata.json"), String))
+const FIXTURE = JSON.parse(read(joinpath(@__DIR__, "reference", "nisar_metadata.json"), String))
 
 # Every float in the fixture carries a hex literal beside its decimal, and the hex is what the tests
 # compare against: a decimal round-trip through JSON is not guaranteed to preserve the last bit.
@@ -86,11 +86,11 @@ end
 `:geometry => :epoch`.
 """
 function override(fx, pairs::Pair...)
-    out = Dict{Symbol,Any}(k => v for (k, v) in Base.pairs(fx))
+    out = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in Base.pairs(fx))
     for (key, value) in pairs
         if key isa Pair
             outer, inner = key
-            nested = Dict{Symbol,Any}(k => v for (k, v) in Base.pairs(out[outer]))
+            nested = Dict{Symbol,Any}(Symbol(k) => v for (k, v) in Base.pairs(out[outer]))
             nested[inner] = value
             out[outer] = NamedTuple(nested)
         else

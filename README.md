@@ -31,21 +31,23 @@ time interval.
 ## Reading a remote product without transferring it
 
 A NISAR RSLC is tens of gigabytes, nearly all of it image samples. Its metadata is tens of kilobytes
-lying within the first few megabytes — measured by logging every byte range the HDF5 library requests,
-one granule needs 26 KiB spread over the first 4.79 MB.
+lying within the first few megabytes.
 
-So a remote product is opened by fetching its head with one ranged request into a sparse local file and
-reading that. The tail is never fetched and occupies no disk.
+A product is read through [ChunkManifests.jl](https://github.com/alex-s-gardner/ChunkManifests.jl),
+which scans its metadata into a Zarr group with byte-range requests and then reads the samples a chunk
+at a time as they are indexed. A remote product is read in place: opening it transfers the metadata,
+and a window of its samples the chunks that window covers.
 
 ```julia
-s = open_slc(RemoteHTTP(url))                  # 8 MB of an 11.77 GB granule
-s = open_slc(RemoteS3("s3://bucket/key.h5"))   # inside the bucket's region
+s = open_slc(RemoteHTTP(url))                  # Earthdata Login from ~/.netrc
+s = open_slc(RemoteS3("s3://bucket/key.h5"))   # needs `using AWSS3`
+pixels(s)[20001:22048, 30001:32048]            # reads only the chunks it needs
 ```
 
-Earthdata URLs authenticate from `~/.netrc` and follow the redirect to the signed data URL, so a
-`machine urs.earthdata.nasa.gov` entry is the only setup. A prefetch window too small to hold the
-metadata fails with the knob to raise rather than an HDF5 stack trace — a truncated read is never
-returned as though it were complete.
+Earthdata URLs authenticate with an Earthdata Login bearer token: `RemoteHTTP(url; token)`,
+`EARTHDATA_TOKEN`, or — with neither — one obtained from the `machine urs.earthdata.nasa.gov` entry of
+`~/.netrc`, so that entry is the only setup. The host answers with a redirect to a pre-signed URL, and the
+token is not sent on to it.
 
 ## Feeding a geometry kernel
 
@@ -146,9 +148,11 @@ Samples are read as they are indexed, so a subswath costs the windows taken from
 Index with ranges where the shape of the read allows — a window is one read per burst it spans, about
 four times faster per sample than resolving a row at a time.
 
-Pixels need an unpacked `.SAFE`. Inside a zip the raster is deflated, so a line is not addressable
-without inflating everything before it; `pixels` says so and names unpacking as the fix. Reading a
-zipped product's metadata is unaffected.
+A zip stores each raster deflated, so a line is not addressable without inflating everything before it.
+A zipped product — local, over HTTP(S) or in S3 — therefore has its rasters inflated whole into a directory
+(`Sentinel1Product(zip; orbit, dir)`, a temporary one by default) the first time its samples are read:
+every subswath it was opened for at once, so a remote archive is read through several streams and each
+member's bytes cross the network once. Reading a zipped product's metadata reads only the annotations.
 
 ### Bursts from ASF
 
@@ -161,14 +165,26 @@ ref = merge_bursts(b)
 ```
 
 Bursts are numbered from 1 here as everywhere else in this package, and the conversion to the
-extractor's 0-based URLs happens inside. Authentication is from `~/.netrc`, as for `RemoteHTTP`. The
-extractor builds a burst on first request and answers `202` until it is ready, which is retried; `dir`
-is where the files are kept, and one already there is not fetched again.
+extractor's 0-based URLs happens inside; `AsfBurst(url)` reads a burst from the URL ASF's search lists
+for it. Authentication is from `~/.netrc`. The extractor builds a burst on first request and answers
+`202` until it is ready, which is retried. A burst's metadata — its parent product's whole annotation —
+is held in memory, and its raster downloaded into `dir`, where one already there is not fetched again.
 
 A merge of ASF bursts and a merge of the same bursts from a `.SAFE` give the same array — verified
 sample for sample, including across seams — so which delivery format you have does not change what you
 read. What differs is that each ASF file holds one burst, where a `.SAFE` raster holds a subswath's
 bursts stacked.
+
+A set of bursts, from one or more subswaths and from consecutive products of one datatake, also opens as
+the product [burst2safe](https://github.com/ASFHyP3/burst2safe) assembles from them:
+
+```julia
+bs = [AsfBurst(url; dir = "bursts") for url in urls]
+p = Sentinel1Product(bs; orbit = eof)      # the subswaths the bursts lie in
+p.path                                     # the SAFE's name, e.g. S1A_IW_SLC__1SSV_..._069D69_0000
+```
+
+Its annotations and stacked rasters equal those of the SAFE `burst2safe` writes from the same bursts.
 
 ### A `Sentinel1Product`
 

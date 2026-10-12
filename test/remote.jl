@@ -1,12 +1,16 @@
-# The access layer, exercised without a network.
+# The remote sources, exercised against local HTTP servers.
 #
-# The sparse-prefetch mechanism is what the remote sources rely on, and it is a local property: a file
-# whose head holds real bytes and whose tail is a hole must read exactly as the whole file does for any
-# dataset living in the head. That is asserted here against the fixture product. The network path
-# itself is `live_nisar.jl`.
+# An Earthdata host takes a bearer token and answers with a redirect to a pre-signed URL on another
+# host, which refuses a request carrying an `Authorization` header. The two servers here play those two
+# parts over the fixture product, so the whole path — scanning in place, the redirect, the header kept
+# from the second host, and reading samples by range — is checked without a network. The live granule is
+# `live_nisar.jl`.
 
 using SLCDatasets
-using SLCDatasets: DEFAULT_PREFETCH, s3_https_url, localpath, source_for, _write_sparse
+using SLCDatasets: localpath, source_for, source_uri, source_transport, _netrc_login, _earthdata_host
+using Base64: base64encode
+using ChunkManifests: HTTPTransport
+using HTTP
 using Test
 
 @testset "source_for dispatches on the spelling" begin
@@ -15,73 +19,120 @@ using Test
     @test source_for("http://example.org/x.h5") isa RemoteHTTP
     @test source_for("s3://bucket/key.h5") isa RemoteS3
     @test localpath(LocalFile("/data/x.h5")) == "/data/x.h5"
+    @test source_uri(RemoteS3("s3://bucket/key.h5")) == "s3://bucket/key.h5"
 end
 
 @testset "constructors reject what cannot work" begin
-    @test_throws "prefetch must be positive" RemoteHTTP("https://example.org/x.h5"; prefetch = 0)
-    @test_throws "prefetch must be positive" RemoteS3("s3://b/k"; prefetch = -1)
     @test_throws "must be addressed as `s3://bucket/key`" RemoteS3("https://example.org/x.h5")
-    @test RemoteHTTP("https://example.org/x.h5").prefetch == DEFAULT_PREFETCH
+    @test_throws "must be addressed as `https://host/path`" RemoteHTTP("s3://bucket/key.h5")
+    @test_throws "`token` is empty" RemoteHTTP("https://example.org/x.h5"; token = "")
+    withenv("EARTHDATA_TOKEN" => "from-env") do
+        @test RemoteHTTP("https://example.org/x.h5").token == "from-env"
+    end
+    withenv("EARTHDATA_TOKEN" => nothing) do
+        @test RemoteHTTP("https://example.org/x.h5").token === nothing
+        @test source_transport(RemoteHTTP("https://example.org/x.h5")) === nothing
+    end
+    @test source_transport(RemoteHTTP("https://example.org/x.h5"; token = nothing, netrc = nothing)) === nothing
+    @test source_transport(RemoteHTTP("https://example.org/x.h5"; token = "t")) isa HTTPTransport
+    @test_throws "is read in place and has no local path" localpath(RemoteHTTP("https://example.org/x.h5"))
 end
 
-@testset "s3_https_url" begin
-    @test s3_https_url("s3://bkt/a/b.h5"; region = "us-west-2") ==
-          "https://bkt.s3.us-west-2.amazonaws.com/a/b.h5"
-    @test_throws "names a bucket but no key" s3_https_url("s3://bkt"; region = "us-west-2")
-    @test_throws "empty key" s3_https_url("s3://bkt/"; region = "us-west-2")
-    # Without a region the endpoint would be wrong and S3 would redirect rather than serve, so the
-    # region is required rather than defaulted.
-    withenv("AWS_REGION" => nothing, "AWS_DEFAULT_REGION" => nothing) do
-        @test_throws "needs a region" s3_https_url("s3://bkt/k.h5")
-    end
-    withenv("AWS_REGION" => "eu-central-1") do
-        @test s3_https_url("s3://bkt/k.h5") == "https://bkt.s3.eu-central-1.amazonaws.com/k.h5"
+# Serves `bytes` by range, refusing any request that carries an `Authorization` header, as a pre-signed
+# URL does.
+function _data_handler(bytes)
+    return function (req)
+        isempty(HTTP.header(req, "Authorization", "")) ||
+            return HTTP.Response(400, "only one auth mechanism allowed")
+        m = match(r"bytes=(\d+)-(\d+)", HTTP.header(req, "Range", ""))
+        m === nothing && return HTTP.Response(200, bytes)
+        a, b = parse(Int, m[1]), min(parse(Int, m[2]), length(bytes) - 1)
+        return HTTP.Response(206, ["Content-Range" => "bytes $a-$b/$(length(bytes))"], bytes[(a + 1):(b + 1)])
     end
 end
 
-@testset "a sparse head reads like the whole file" begin
-    # This is the property the remote sources rest on: fetching only the head and declaring the full
-    # length yields a file whose metadata reads identically.
+# Answers a request carrying the token with a redirect to `target`, and any other with 401.
+_auth_handler(token, target) = req ->
+    HTTP.header(req, "Authorization", "") == "Bearer $token" ?
+    HTTP.Response(307, ["Location" => target]) : HTTP.Response(401, "unauthorized")
+
+@testset "an Earthdata-style product reads in place through the redirect" begin
+    A = ComplexF32[complex(i, -j) for i in 1:37, j in 1:23]
     mktempdir() do dir
-        full = write_fixture_product(joinpath(dir, "full.h5"))
-        total = filesize(full)
-        reference = open_slc(full)
+        path = write_fixture_product(joinpath(dir, "remote.h5"); samples = A, chunk = (5, 8),
+                                     filters = (:shuffle, :deflate))
+        reference = open_slc(path)
+        data = HTTP.serve!(_data_handler(read(path)), "127.0.0.1", 0)
+        # Named as `localhost` so the redirect crosses to another host, as an Earthdata one does.
+        target = "http://localhost:$(HTTP.port(data))/remote.h5"
+        auth = HTTP.serve!(_auth_handler("secret", target), "127.0.0.1", 0)
+        url = "http://127.0.0.1:$(HTTP.port(auth))/remote.h5"
+        try
+            s = open_slc(RemoteHTTP(url; token = "secret"))
+            @test s.geometry.starting_range === reference.geometry.starting_range
+            @test s.geometry.sensing_start === reference.geometry.sensing_start
+            @test s.identification.absolute_orbit == reference.identification.absolute_orbit
+            @test orbit(s).position == orbit(reference).position
+            p = pixels(s)
+            @test p[:, :] == A
+            @test p[6:20, 3:18] == A[6:20, 3:18]
 
-        head = read(open(full, "r"), total)
-        sparse = _write_sparse(joinpath(dir, "sparse.h5"), head, total)
-        @test filesize(sparse) == total
-
-        s = open_slc(sparse)
-        @test s.geometry.starting_range === reference.geometry.starting_range
-        @test s.geometry.sensing_start === reference.geometry.sensing_start
-        @test s.geometry.nlines == reference.geometry.nlines
-        @test orbit(s).time == orbit(reference).time
-        @test orbit(s).position == orbit(reference).position
+            @test_throws Exception open_slc(RemoteHTTP(url; token = "wrong"))
+        finally
+            close(auth)
+            close(data)
+        end
     end
 end
 
-@testset "a hole past the metadata is never read" begin
-    # The fixture product is small, so padding it proves the shape rather than the byte count: a file
-    # declaring far more length than it holds still opens, because nothing reads into the hole.
+@testset "a .netrc entry is read wherever it is spelled" begin
     mktempdir() do dir
-        full = write_fixture_product(joinpath(dir, "full.h5"))
-        head = read(full)
-        padded = _write_sparse(joinpath(dir, "padded.h5"), head, length(head) + 64 * 1024 * 1024)
-        @test filesize(padded) > length(head)
-        s = open_slc(padded)
-        @test s.geometry.nsamples == FIXTURE.geometry.nsamples
-        @test length(orbit(s).time) == FIXTURE.orbit.n
+        one = joinpath(dir, "one")
+        write(one, "machine other.host login a password b\nmachine urs.earthdata.nasa.gov login me password s3cret\n")
+        @test _netrc_login(one, "urs.earthdata.nasa.gov") == ("me", "s3cret")
+        spread = joinpath(dir, "spread")
+        write(spread, "machine urs.earthdata.nasa.gov\n    password p\n    login u\ndefault login x password y\n")
+        @test _netrc_login(spread, "urs.earthdata.nasa.gov") == ("u", "p")
+        @test _netrc_login(spread, "nowhere") === nothing
+        @test_throws "has no `machine urs.earthdata.nasa.gov login" earthdata_token(spread * "-absent")
     end
 end
 
-@testset "a truncated head fails, and names the knob" begin
-    # Half a file is not a readable product. The failure must say which knob fixes it rather than
-    # surfacing an HDF5 stack trace, and must not be mistaken for a corrupt product.
+@testset "only an Earthdata host is sent a token from .netrc" begin
+    @test _earthdata_host("https://nisar.asf.earthdatacloud.nasa.gov/NISAR/x.h5")
+    @test _earthdata_host("https://sentinel1.asf.alaska.edu/SLC/x.zip")
+    @test !_earthdata_host("https://example.org/x.h5")
+    @test !_earthdata_host("https://nasa.gov.example.org/x.h5")
     mktempdir() do dir
-        full = write_fixture_product(joinpath(dir, "full.h5"))
-        total = filesize(full)
-        head = read(open(full, "r"), max(2048, total ÷ 4))
-        truncated = _write_sparse(joinpath(dir, "truncated.h5"), head, total)
-        @test_throws Exception open_slc(truncated)
+        netrc = joinpath(dir, "netrc")
+        write(netrc, "machine urs.earthdata.nasa.gov login me password s3cret\n")
+        withenv("EARTHDATA_TOKEN" => nothing, "NETRC" => netrc) do
+            @test RemoteHTTP("https://data.asf.alaska.edu/x.h5").netrc == netrc
+            @test RemoteHTTP("https://example.org/x.h5").netrc === nothing
+            @test RemoteHTTP("https://data.asf.alaska.edu/x.h5"; token = "t").netrc === nothing
+        end
+    end
+end
+
+@testset "a token is asked of Earthdata Login with the .netrc credentials" begin
+    seen = Ref("")
+    edl = HTTP.serve!("127.0.0.1", 0) do req
+        seen[] = HTTP.header(req, "Authorization", "")
+        seen[] == "Basic " * base64encode("me:s3cret") ?
+            HTTP.Response(200, "{\"access_token\":\"tok-1\",\"token_type\":\"Bearer\"}") :
+            HTTP.Response(401, "bad credentials")
+    end
+    try
+        mktempdir() do dir
+            good = joinpath(dir, "good")
+            write(good, "machine urs.earthdata.nasa.gov login me password s3cret\n")
+            url = "http://127.0.0.1:$(HTTP.port(edl))/api/users/find_or_create_token"
+            @test earthdata_token(good; url) == "tok-1"
+            bad = joinpath(dir, "bad")
+            write(bad, "machine urs.earthdata.nasa.gov login me password wrong\n")
+            @test_throws "refused the credentials" earthdata_token(bad; url)
+        end
+    finally
+        close(edl)
     end
 end

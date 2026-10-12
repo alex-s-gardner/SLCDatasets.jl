@@ -15,7 +15,7 @@
 using SLCDatasets
 using SLCDatasets: MergedBurstBackend, ConcatenatedBursts, BurstValidMask, Amplitude,
            BurstGrid, BurstPlacement,
-                   read_annotation, annotation_xml, burst_grid, measurement_path, open_tiff,
+                   read_annotation, annotation_xml, burst_grid, measurement_path, open_measurement,
                    Sentinel1Product, UtcTime, seconds_between, valid_lines, valid_samples,
                    MAX_BURST_GRID_RESIDUAL, grid, safe_polarizations
 using Test
@@ -199,8 +199,8 @@ if !isempty(S1_PRODUCTS)
         pol = String(p.gold.polarization)
         m = merge_bursts(bursts(p.safe; orbit = p.eof, swath = 2, polarization = pol))
         if !isdir(p.safe)
-            # A zipped product: the raster is deflated inside it, so a window is not addressable.
-            @test_throws "zipped Sentinel-1 product" pixels(m)
+            # A zipped product's raster is a deflated member, read a window at a time through its index.
+            @test size(pixels(m)[1:4, 1:4]) == (4, 4)
         else
             # The rebuilt fixture carries annotation only.
             @test_throws "annotation only" pixels(m)
@@ -231,7 +231,7 @@ if !isempty(MERGE_SAFE) && !isempty(MERGE_EOF)
         b = bursts(MERGE_SAFE; orbit = MERGE_EOF, swath, polarization = pol)
         m = merge_bursts(b)
         a = read_annotation(annotation_xml(MERGE_SAFE, swath, pol), swath)
-        raster = open_tiff(measurement_path(
+        raster = open_measurement(measurement_path(
             Sentinel1Product(MERGE_SAFE; orbit = MERGE_EOF, polarization = pol), swath))
 
         px = pixels(m)

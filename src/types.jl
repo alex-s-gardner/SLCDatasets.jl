@@ -115,7 +115,7 @@ keeping the strict minimum does.
 """
 function nearest_polynomial(polys::AbstractVector{RangePolynomial}, t::UtcTime)
     isempty(polys) && throw(ArgumentError(
-        "the annotation lists no polynomials, so none can be selected for $t"))
+        "the annotation lists no polynomials, so none can be selected for " * _utc_string(t)))
     best = firstindex(polys)
     best_dt = abs(seconds_between(polys[best].time, t))
     for i in Iterators.drop(eachindex(polys), 1)
@@ -239,6 +239,16 @@ LocalFile(path::AbstractString) = LocalFile(String(path))
 A path that can be opened, materializing whatever the source needs to make that true.
 """
 localpath(src::LocalFile) = src.path
+
+"""
+    source_uri(src::AbstractSLCSource) -> String
+    source_transport(src::AbstractSLCSource)
+
+What ChunkManifests.jl scans for `src`: the path or URI, and the transport to read it through, or
+`nothing` for the default.
+"""
+source_uri(src::AbstractSLCSource) = localpath(src)
+source_transport(::AbstractSLCSource) = nothing
 
 """
     Identification

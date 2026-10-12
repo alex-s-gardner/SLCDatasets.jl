@@ -41,49 +41,45 @@ still readable.
 """
 function is_safe_product(path::AbstractString)
     isdir(path) && return isfile(joinpath(path, "manifest.safe"))
-    isfile(path) || return false
-    # Reading the central directory is enough; the measurement TIFFs are never touched. The names are
-    # generated rather than collected so the scan stops at the manifest, which is near the front.
-    return try
-        with_zip(path) do r
-            any(i -> endswith(zip_name(r, i), "manifest.safe"), 1:zip_nentries(r))
-        end
-    catch
-        false
-    end
+    _is_remote(path) || isfile(path) || return false
+    # Reading the central directory is enough; the measurement TIFFs are never touched.
+    return _is_zip(path) && with_zip(r -> any(m -> endswith(m.name, "manifest.safe"), r.members), path)
 end
 
-# The archive is memory-mapped rather than read: a Sentinel-1 zip is a few gigabytes of measurement
-# TIFFs around a few hundred kilobytes of annotation XML, and reading it into a buffer to reach the XML
-# would cost the whole file's size in memory per call.
-function with_zip(f, path::AbstractString)
-    return open(path) do io
-        f(ZipReader(mmap(io, Vector{UInt8}, filesize(path); grow = false)))
-    end
+# Whether `path` starts with a zip local file header — a cheap test before parsing a directory.
+function _is_zip(path::AbstractString)
+    _is_remote(path) && return endswith(lowercase(path), ".zip")
+    filesize(path) >= 4 || return false
+    return open(io -> read(io, 4) == UInt8[0x50, 0x4b, 0x03, 0x04], path)
 end
-
-# Every entry name in an archive. The readers filter while listing rather than calling this, so it
-# exists for a caller that genuinely wants the whole central directory.
-zip_names(r) = [zip_name(r, i) for i in 1:zip_nentries(r)]
 
 # An annotation file is `annotation/s1a-iw1-slc-hh-....xml`. The parallel `annotation/calibration/` and
 # `annotation/rfi/` trees hold same-named files for products this package does not read, so matching on
 # the file name alone would pick one of those up; the parent directory has to be `annotation` itself.
 function _is_annotation(name::AbstractString, id_str::AbstractString)
     endswith(name, ".xml") || return false
-    slash = findlast('/', name)
-    slash === nothing && return false
+    slash = _last_slash(name)
+    slash == 0 && return false
     occursin(id_str, SubString(name, slash + 1)) || return false
     rest = SubString(name, 1, slash - 1)
-    prev = findlast('/', rest)
-    return SubString(rest, something(prev, 0) + 1) == "annotation"
+    return SubString(rest, _last_slash(rest) + 1) == "annotation"
+end
+
+# The index of the last `/` in `s`, or 0. A byte scan: `/` is ASCII, so it is never part of a multi-byte
+# character.
+function _last_slash(s::AbstractString)
+    u = codeunits(s)
+    for i in reverse(eachindex(u))
+        u[i] == UInt8('/') && return i
+    end
+    return 0
 end
 
 # The file-name part of a zip entry. Only for a name `_is_annotation` accepted, which is what guarantees
 # the separator is there.
 function _zip_basename(name::AbstractString)
-    slash = findlast('/', name)
-    slash === nothing && throw(ArgumentError("`$name` names no directory, so it has no file part"))
+    slash = _last_slash(name)
+    slash == 0 && throw(ArgumentError("`" * name * "` names no directory, so it has no file part"))
     return SubString(name, slash + 1)
 end
 
@@ -111,7 +107,7 @@ opening a product one traversal rather than one per query.
 """
 struct AnnotationTree{C}
     path::String
-    container::C          # the `ZipReader`, or the `annotation` directory of a `.SAFE`
+    container::C          # the `ZipArchive`, or the `annotation` directory of a `.SAFE`
     names::Vector{String} # entry names as the container addresses them
 end
 
@@ -128,7 +124,7 @@ function with_annotations(f, path::AbstractString)
         return f(AnnotationTree(String(path), dir, names))
     end
     return with_zip(path) do r
-        names = [zip_name(r, i) for i in 1:zip_nentries(r) if _is_annotation(zip_name(r, i), "-slc-")]
+        names = [m.name for m in r.members if _is_annotation(m.name, "-slc-")]
         return f(AnnotationTree(String(path), r, names))
     end
 end
@@ -139,7 +135,7 @@ _entry_file(r::AnnotationTree{<:AbstractString}, name) = name
 _entry_file(::AnnotationTree, name) = _zip_basename(name)
 
 _read_entry(r::AnnotationTree{<:AbstractString}, name) = read(joinpath(r.container, name), String)
-_read_entry(r::AnnotationTree, name) = zip_readentry(r.container, name, String)
+_read_entry(r::AnnotationTree{ZipArchive}, name) = read_zip_entry(r.container, name)
 
 """
     read_annotation_entry(r::AnnotationTree, swath, polarization) -> String
@@ -470,12 +466,13 @@ function _read_polynomial_list(r::EzXML.Node, path::AbstractString, name::Abstra
 end
 
 """
-    Sentinel1Product(path; orbit, polarization = nothing, swaths = 1:3)
+    Sentinel1Product(path; orbit, polarization = nothing, swaths = 1:3, dir = nothing)
 
 A Sentinel-1 TOPS product with its annotation already parsed.
 
 `swaths` names the subswaths to read; each is parsed once and held, so every geometry, burst and orbit
-derived from this product costs no further parsing of the container. Build the acquisitions with
+derived from this product costs no further parsing of the container. A zipped product's measurement
+rasters are inflated into `dir`, a temporary directory by default, when its samples are first read. Build the acquisitions with
 [`open_slc`](@ref) or [`bursts`](@ref) rather than reaching into the fields.
 """
 struct Sentinel1Product
@@ -486,15 +483,24 @@ struct Sentinel1Product
     # sorted ascending, which is what makes the first entry the near-range subswath of a mosaic.
     swaths::Vector{Int}
     annotations::Vector{SubswathAnnotation}
+    # For a product assembled from extracted bursts, `bursts[i]` are subswath `swaths[i]`'s bursts in
+    # azimuth order, and `path` is the product's name; empty for a `.SAFE` or a zip.
+    bursts::Vector{Vector{AsfBurst}}
+    # Where a zipped product's measurement rasters are inflated; `nothing` for a temporary directory.
+    dir::Union{Nothing,String}
 end
 
+Sentinel1Product(path::AbstractString, orbit_path::AbstractString, polarization::AbstractString,
+                 swaths::Vector{Int}, annotations::Vector{SubswathAnnotation}) =
+    Sentinel1Product(path, orbit_path, polarization, swaths, annotations, Vector{AsfBurst}[], nothing)
+
 Sentinel1Product(path::AbstractString; orbit::AbstractString,
-                 polarization = nothing, swaths = S1_SUBSWATHS) =
-    with_annotations(r -> Sentinel1Product(r; orbit, polarization, swaths), path)
+                 polarization = nothing, swaths = S1_SUBSWATHS, dir = nothing) =
+    with_annotations(r -> Sentinel1Product(r; orbit, polarization, swaths, dir), path)
 
 # One listing of the container serves the polarization query and every subswath's annotation.
 function Sentinel1Product(r::AnnotationTree; orbit::AbstractString,
-                          polarization = nothing, swaths = S1_SUBSWATHS)
+                          polarization = nothing, swaths = S1_SUBSWATHS, dir = nothing)
     # Sorted here so `annotations` is near-range first, which is what makes a mosaic's first entry the
     # subswath that sets its range origin.
     selected = sort!(collect(Int, swaths))
@@ -503,7 +509,8 @@ function Sentinel1Product(r::AnnotationTree; orbit::AbstractString,
           lowercase(String(polarization))
     pol in available || _no_polarization(r.path, available, pol)
     annotations = [read_annotation(read_annotation_entry(r, s, pol), s) for s in selected]
-    return Sentinel1Product(r.path, String(orbit), pol, selected, annotations)
+    return Sentinel1Product(r.path, String(orbit), pol, selected, annotations, Vector{AsfBurst}[],
+                            dir === nothing ? nothing : String(dir))
 end
 
 @noinline _no_polarization(path, available, pol) = throw(ArgumentError(
@@ -559,10 +566,10 @@ every border by up to a pixel.
 function subswath_borders(reference::Sentinel1Product, secondary::Sentinel1Product)
     length(reference.swaths) == 3 && reference.swaths == [1, 2, 3] || throw(ArgumentError(
         "subswath_borders needs `reference` opened for all three subswaths (swaths = 1:3), got " *
-        "$(reference.swaths)"))
+        join(map(string, reference.swaths), ", ")))
     length(secondary.swaths) == 3 && secondary.swaths == [1, 2, 3] || throw(ArgumentError(
         "subswath_borders needs `secondary` opened for all three subswaths (swaths = 1:3), got " *
-        "$(secondary.swaths)"))
+        join(map(string, secondary.swaths), ", ")))
 
     iw1, iw2, iw3 = reference.annotations
     r0, sp0 = iw1.starting_range, iw1.range_pixel_spacing
@@ -962,25 +969,18 @@ end
 # Reaching a subswath's measurement raster.
 #
 # The raster sits beside the annotation under the same stem: `annotation/s1a-iw2-slc-hh-….xml` names
-# `measurement/s1a-iw2-slc-hh-….tiff`. Only a `.SAFE` directory can be indexed, because a zip stores the
-# raster deflated — reaching a line means inflating everything before it, and the strip table it would
-# need first is at the end of the entry. Metadata reads from a zip are unaffected, so the refusal
-# happens here rather than at `open_slc`.
+# `measurement/s1a-iw2-slc-hh-….tiff`. In a `.SAFE` directory it is a file; in a zip it is a deflated
+# member, read through [`ZippedMeasurement`](@ref).
 
 """
     measurement_path(product::Sentinel1Product, swath) -> String
 
-The measurement raster of one subswath.
-
-Throws for a zipped product, naming what to do instead: the raster is deflated inside the archive, so
-its lines are not addressable without inflating the whole entry.
+The measurement raster of one subswath of a `.SAFE` directory.
 """
 function measurement_path(p::Sentinel1Product, swath::Integer)
     isdir(p.path) || throw(ArgumentError(
-        "`$(p.path)` is a zipped Sentinel-1 product, whose measurement raster is deflated inside " *
-        "the archive and so cannot be read a window at a time. Unpack it and open the `.SAFE` " *
-        "directory, or read the bursts from ASF's burst extractor. Reading the metadata of a zipped " *
-        "product needs no unpacking and is unaffected"))
+        "`$(p.path)` is a zipped Sentinel-1 product; its measurement rasters are members of the archive, " *
+        "not files"))
 
     dir = joinpath(p.path, "measurement")
     isdir(dir) || throw(ArgumentError(
@@ -1000,15 +1000,22 @@ end
 # describes, and reading it would silently return another burst's samples.
 function _subswath_raster(p::Sentinel1Product, swath::Integer)
     a = annotation(p, swath)
-    raster = open_tiff(measurement_path(p, swath))
+    file, raster = if !isempty(p.bursts)
+        _stacked_measurement(p, swath)
+    elseif isdir(p.path)
+        f = measurement_path(p, swath)
+        (f, open_measurement(f))
+    else
+        _zipped_measurement(p, swath)
+    end
 
     expected = a.lines_per_burst * nbursts(a)
     size(raster, 1) == expected || throw(ArgumentError(
-        "`$(path(raster))` has $(size(raster, 1)) lines, but subswath IW$swath has $(nbursts(a)) " *
+        "`$file` has $(size(raster, 1)) lines, but subswath IW$swath has $(nbursts(a)) " *
         "bursts of $(a.lines_per_burst) lines and so should have $expected. The raster and the " *
         "annotation describe different products"))
     size(raster, 2) == a.samples_per_burst || throw(ArgumentError(
-        "`$(path(raster))` is $(size(raster, 2)) samples wide but subswath IW$swath records " *
+        "`$file` is $(size(raster, 2)) samples wide but subswath IW$swath records " *
         "$(a.samples_per_burst)"))
     return raster, a
 end
@@ -1029,4 +1036,39 @@ function burst_rasters(sources::AbstractVector{Sentinel1Backend})
     b = first(sources)
     raster, a = _subswath_raster(b.product, burst_swath(b))
     return [BurstRaster(raster, (burst_index(s) - 1) * a.lines_per_burst) for s in sources]
+end
+
+"""
+    prefetch_rasters(p::Sentinel1Product) -> Sentinel1Product
+
+Make every measurement raster of `p` local now rather than at its first read: a zip's members inflated, an
+assembled product's bursts downloaded. Safe to run in a task beside other reads of `p`, which wait for what
+it is fetching; a `.SAFE`'s rasters are local already.
+"""
+function prefetch_rasters(p::Sentinel1Product)
+    if !isempty(p.bursts)
+        asf_rasters(reduce(vcat, p.bursts))
+    elseif !isdir(p.path)
+        _zipped_measurement(p, first(p.swaths))
+    end
+    return p
+end
+
+# A zipped product's measurement raster for one subswath, inflated into the product's directory. The
+# first read inflates the members of every subswath the product was opened for, together.
+function _zipped_measurement(p::Sentinel1Product, swath::Integer)
+    r = ZipArchive(p.path)
+    names = [_measurement_member(p, r, sw) for sw in p.swaths]
+    files = extract_measurements(r, names, p.dir === nothing ? _scratch_dir() : p.dir)
+    file = files[findfirst(==(Int(swath)), p.swaths)]
+    return (file, open_measurement(file))
+end
+
+function _measurement_member(p::Sentinel1Product, r::ZipArchive, swath::Int)
+    id_str = _swath_id(swath, p.polarization)
+    hits = sort!([m.name for m in r.members
+                  if occursin("/measurement/", m.name) && occursin(id_str, m.name) && endswith(m.name, ".tiff")])
+    isempty(hits) && throw(ArgumentError(
+        "`$(p.path)` has no measurement raster for subswath IW$swath polarization $(uppercase(p.polarization))"))
+    return only(hits)
 end

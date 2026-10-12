@@ -1,8 +1,7 @@
 # Reaching an acquisition's samples, and the amplitude of them.
 #
-# Reading samples is not something every product this package opens can do: a Sentinel-1 product read
-# from a zip cannot reach its raster at all — the entry is deflated, so a line is not addressable without
-# inflating everything before it — and a product rebuilt from metadata alone has no sample array to read.
+# Reading samples is not something every product this package opens can do: a product rebuilt from metadata
+# alone has no sample array to read.
 # So `pixels` is a backend method a backend may not have, and a backend without one says why rather than
 # raising a `MethodError` naming an internal type.
 #
@@ -20,9 +19,8 @@ taken from it. Index it with ranges where the shape of the read allows: `p[rows,
 burst spanned, while scalar indexing resolves a row per sample.
 
 Not every product can reach its samples. A Sentinel-1 product read from a zip cannot — the raster is
-deflated inside it — and neither can a remote product whose image was never transferred; both say so
-rather than returning something partial. A NISAR product reads its samples out of its HDF5 dataset a
-window at a time; see [`SLCDatasets.NisarRaster`](@ref). [`amplitude`](@ref) for the real magnitudes, and
+deflated inside it — and says so rather than returning something partial. A NISAR product, local or
+remote, reads its samples out of its HDF5 dataset a chunk at a time; see [`SLCDatasets.NisarRaster`](@ref). [`amplitude`](@ref) for the real magnitudes, and
 [`validmask`](@ref) for which samples were imaged.
 """
 pixels(s::AbstractSLC) = read_pixels(s.backend)

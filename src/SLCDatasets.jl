@@ -11,9 +11,9 @@ The scope is SLCs in radar geometry, not SAR products generally. An interferogra
 product carries a multilooked grid, and a geocoded SLC carries map coordinates rather than a slant-range
 axis — neither is described by [`RadarGeometry`](@ref), so neither is read here.
 
-NISAR-format HDF5 range-Doppler products (RSLC) are read natively. The metadata of one is a few tens of
-kilobytes near the start of a file tens of gigabytes long, so a remote product can be opened without
-transferring it.
+NISAR-format HDF5 range-Doppler products (RSLC) are read through libhdf5 for their metadata and
+ChunkManifests.jl's typed arrays for their samples. The metadata of one is a few tens of kilobytes near the start of a file tens of gigabytes
+long, so a remote product is opened, and its samples read a chunk at a time, without transferring it.
 
 Sentinel-1 IW SLCs are read from a `.SAFE` directory or the zip of one, taking geometry from the
 annotation XML and state vectors from a POEORB or RESORB `.EOF` file, which a Sentinel-1 product does
@@ -30,22 +30,22 @@ reads nothing further. [`bursts`](@ref) returns a whole subswath's bursts as an
 [`merge_bursts`](@ref) folds those bursts into one acquisition, placing them on a single uniform azimuth
 grid so that a line's time is `sensing_start + line / prf` throughout. [`pixels`](@ref) and
 [`amplitude`](@ref) read its samples as they are indexed, and [`validmask`](@ref) says which of them
-were imaged. Samples need an unpacked `.SAFE`: inside a zip the raster is deflated, so a line is not
-addressable without inflating everything before it.
+were imaged. A zip stores each raster deflated, so a line is not addressable without inflating everything
+before it: a zipped product's rasters are inflated whole into a directory when its samples are first read.
 """
 module SLCDatasets
 
 import Dates
 import DiskArrays
-import HDF5
+using ChunkManifests: H5File, HTTPTransport, LeafTransport, LocalTransport, S3Transport, TypedArray,
+                      h5_attr_string, h5_dims, h5_exists, h5_isgroup, h5_open_array, h5_read, h5_read_elements, h5_read_strings, h5open_typed,
+                      http_request, http_resolve, fetchall, fetchranges, objectsize, ByteRange,
+                      open_tiff, ZipMember, zip_members, read_member, extract_member
 using Dates: DateTime
 import EzXML
 using EzXML: parsexml, readxml, root, findfirst, findall, nodecontent, nodename, eachelement
-using HDF5: h5open, ishdf5, read_attribute
-import Zlib_jll
-using Mmap: mmap
 using StaticArrays: SVector
-using ZipArchives: ZipReader, zip_name, zip_nentries, zip_readentry
+import Zarr
 
 export open_slc, bursts, orbit, nlines, nsamples, start_datetime, stop_datetime
 export repeat_interval, epoch_offset, nbursts
@@ -56,9 +56,9 @@ export merge_bursts, pixels, amplitude, validmask
 export is_tops, deramp_parameters, burst_at
 export DerampParameters, RangePolynomial, nearest_polynomial
 export SLC, SLCSeries, Identification, RadarGeometry, StateVectors
-export Sentinel1Product, subswath_borders
-export LocalFile, RemoteHTTP, RemoteS3
-export AsfBurst, asf_bursts
+export Sentinel1Product, subswath_borders, prefetch_rasters
+export LocalFile, RemoteHTTP, RemoteS3, earthdata_token
+export AsfBurst, asf_bursts, asf_safe_name, is_asf_burst_url
 # `grid` stays unexported for the reason `LookSide` does: a raster or geometry package consuming this one
 # defines its own, and exporting both makes the name ambiguous at every call site. `GeocodedProduct`
 # carries it as a field, and `geocoded_grid` reads one from a backend.
@@ -70,8 +70,11 @@ export open_geocoded, GeocodedProduct, GeocodedGrid, geocoded_grid
 include("util.jl")
 include("time.jl")
 include("types.jl")
-include("tiff.jl")
+include("measurement.jl")
+include("zipped.jl")
 include("nisar.jl")
+# `extractor.jl` before `sentinel1.jl`: a product assembled from extracted bursts holds them.
+include("extractor.jl")
 include("sentinel1.jl")
 include("burstgrid.jl")
 include("concatenated.jl")
