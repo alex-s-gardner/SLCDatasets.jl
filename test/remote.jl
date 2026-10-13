@@ -35,6 +35,8 @@ end
     end
     @test source_transport(RemoteHTTP("https://example.org/x.h5"; token = nothing, netrc = nothing)) === nothing
     @test source_transport(RemoteHTTP("https://example.org/x.h5"; token = "t")) isa HTTPTransport
+    # Read from where the download redirects, not through the redirect chain on every request.
+    @test source_transport(RemoteHTTP("https://example.org/x.h5"; token = "t")).redirects !== nothing
     @test_throws "is read in place and has no local path" localpath(RemoteHTTP("https://example.org/x.h5"))
 end
 

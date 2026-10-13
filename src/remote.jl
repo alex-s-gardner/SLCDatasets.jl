@@ -11,7 +11,9 @@
 A product reachable over HTTP(S) from a server honoring range requests, read in place.
 
 `token` is an Earthdata Login bearer token, sent as `Authorization: Bearer <token>`. An Earthdata host
-answers it with a redirect to a pre-signed URL, and the header is not sent on to that other host.
+answers it with a redirect to a pre-signed URL, and the header is not sent on to that other host. The
+redirect is followed once and the product read from the pre-signed URL, which is followed again when it
+expires.
 
 Without a token, an Earthdata host — one under `nasa.gov` or `alaska.edu` — is read with a token
 obtained from the `urs.earthdata.nasa.gov` entry of `netrc`, `~/.netrc` (or `ENV["NETRC"]`) by default,
@@ -76,7 +78,7 @@ function source_transport(src::RemoteHTTP)
     token = src.token !== nothing ? src.token :
             src.netrc !== nothing ? earthdata_token(src.netrc) : nothing
     token === nothing && return nothing
-    return HTTPTransport(; headers = ["Authorization" => "Bearer $token"])
+    return HTTPTransport(; headers = ["Authorization" => "Bearer $token"], resolve = true)
 end
 
 # Only what is read in place reaches a remote product; a Sentinel-1 raster needs an unpacked `.SAFE`.
