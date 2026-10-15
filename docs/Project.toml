@@ -3,10 +3,14 @@ ChunkManifests = "558bc7c3-2be7-4981-9bcf-ba6cea128854"
 Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
 SLCDatasets = "1d8f5cac-0b48-4ea8-8d35-4fce00b6c96f"
 Zarr = "0a941bbe-ad1d-11e8-39d9-ab76183a1d99"
+ZarrCore = "77f5b75c-4c08-499f-ba13-550b0a0af171"
+ZarrZlib = "5ee7c756-6ac8-46ad-a53f-994846513443"
 
 # `[sources]` is honored only in the active project, so the root Project.toml's pins are repeated here;
 # ChunkManifests and Zarr are listed as dependencies only so that they can be.
 [sources]
 ChunkManifests = {rev = "main", url = "https://github.com/alex-s-gardner/ChunkManifests.jl"}
 SLCDatasets = {path = ".."}
-Zarr = {rev = "complex-int-dtype", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+Zarr = {rev = "complex-int-dtype-v0.11", subdir = "Zarr", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+ZarrCore = {rev = "complex-int-dtype-v0.11", subdir = "ZarrCore", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+ZarrZlib = {rev = "complex-int-dtype-v0.11", subdir = "ZarrZlib", url = "https://github.com/alex-s-gardner/Zarr.jl"}

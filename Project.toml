@@ -17,11 +17,19 @@ Dates = "1"
 DiskArrays = "0.4"
 EzXML = "1"
 StaticArrays = "1"
-Zarr = "0.10"
+Zarr = "0.11"
+ZarrCore = "0.11.1"
+ZarrZlib = "0.11"
 # 1.11, not the LTS: ChunkManifests and the Zarr.jl branch it needs are not registered, so they resolve
 # only through `[sources]`, which Pkg ignores before 1.11.
 julia = "1.11"
 
 [sources]
 ChunkManifests = {rev = "main", url = "https://github.com/alex-s-gardner/ChunkManifests.jl"}
-Zarr = {rev = "complex-int-dtype", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+Zarr = {rev = "complex-int-dtype-v0.11", subdir = "Zarr", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+ZarrCore = {rev = "complex-int-dtype-v0.11", subdir = "ZarrCore", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+ZarrZlib = {rev = "complex-int-dtype-v0.11", subdir = "ZarrZlib", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+
+[extras]
+ZarrCore = "77f5b75c-4c08-499f-ba13-550b0a0af171"
+ZarrZlib = "5ee7c756-6ac8-46ad-a53f-994846513443"
