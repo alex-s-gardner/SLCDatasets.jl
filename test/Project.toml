@@ -9,8 +9,12 @@ JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Zarr = "0a941bbe-ad1d-11e8-39d9-ab76183a1d99"
+ZarrCore = "77f5b75c-4c08-499f-ba13-550b0a0af171"
+ZarrZlib = "5ee7c756-6ac8-46ad-a53f-994846513443"
 
 # `[sources]` is honored only in the active project, so the root Project.toml's pins are repeated here.
 [sources]
 ChunkManifests = {rev = "main", url = "https://github.com/alex-s-gardner/ChunkManifests.jl"}
-Zarr = {rev = "complex-int-dtype", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+Zarr = {rev = "complex-int-dtype-v0.11", subdir = "Zarr", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+ZarrCore = {rev = "complex-int-dtype-v0.11", subdir = "ZarrCore", url = "https://github.com/alex-s-gardner/Zarr.jl"}
+ZarrZlib = {rev = "complex-int-dtype-v0.11", subdir = "ZarrZlib", url = "https://github.com/alex-s-gardner/Zarr.jl"}
