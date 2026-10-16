@@ -10,6 +10,8 @@ DiskArrays = "3c3547ce-8d99-4f5e-a174-61eb10b00ae3"
 EzXML = "8f5d6c58-4d21-5cfd-889c-e3ad7ee6a615"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Zarr = "0a941bbe-ad1d-11e8-39d9-ab76183a1d99"
+ZarrCore = "77f5b75c-4c08-499f-ba13-550b0a0af171"
+ZarrZlib = "5ee7c756-6ac8-46ad-a53f-994846513443"
 
 [compat]
 ChunkManifests = "0.1"
@@ -30,6 +32,3 @@ Zarr = {rev = "complex-int-dtype-v0.11", subdir = "Zarr", url = "https://github.
 ZarrCore = {rev = "complex-int-dtype-v0.11", subdir = "ZarrCore", url = "https://github.com/alex-s-gardner/Zarr.jl"}
 ZarrZlib = {rev = "complex-int-dtype-v0.11", subdir = "ZarrZlib", url = "https://github.com/alex-s-gardner/Zarr.jl"}
 
-[extras]
-ZarrCore = "77f5b75c-4c08-499f-ba13-550b0a0af171"
-ZarrZlib = "5ee7c756-6ac8-46ad-a53f-994846513443"
