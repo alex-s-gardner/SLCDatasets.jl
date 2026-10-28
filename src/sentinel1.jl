@@ -483,9 +483,9 @@ struct Sentinel1Product
     # sorted ascending, which is what makes the first entry the near-range subswath of a mosaic.
     swaths::Vector{Int}
     annotations::Vector{SubswathAnnotation}
-    # For a product assembled from extracted bursts, `bursts[i]` are subswath `swaths[i]`'s bursts in
-    # azimuth order, and `path` is the product's name; empty for a `.SAFE` or a zip.
-    bursts::Vector{Vector{AsfBurst}}
+    # For a product assembled from bursts, `bursts[i]` are subswath `swaths[i]`'s bursts in azimuth
+    # order, and `path` is the product's name; empty for a `.SAFE` or a zip.
+    bursts::Union{Vector{Vector{AsfBurst}},Vector{Vector{ZipBurst}}}
     # Where a zipped product's measurement rasters are inflated; `nothing` for a temporary directory.
     dir::Union{Nothing,String}
 end
@@ -1042,12 +1042,12 @@ end
     prefetch_rasters(p::Sentinel1Product) -> Sentinel1Product
 
 Make every measurement raster of `p` local now rather than at its first read: a zip's members inflated, an
-assembled product's bursts downloaded. Safe to run in a task beside other reads of `p`, which wait for what
+assembled product's bursts downloaded or inflated out of their zips. Safe to run in a task beside other reads of `p`, which wait for what
 it is fetching; a `.SAFE`'s rasters are local already.
 """
 function prefetch_rasters(p::Sentinel1Product)
     if !isempty(p.bursts)
-        asf_rasters(reduce(vcat, p.bursts))
+        burst_files(reduce(vcat, p.bursts))
     elseif !isdir(p.path)
         _zipped_measurement(p, first(p.swaths))
     end
@@ -1064,11 +1064,16 @@ function _zipped_measurement(p::Sentinel1Product, swath::Integer)
     return (file, open_measurement(file))
 end
 
-function _measurement_member(p::Sentinel1Product, r::ZipArchive, swath::Int)
-    id_str = _swath_id(swath, p.polarization)
+_measurement_member(p::Sentinel1Product, r::ZipArchive, swath::Int) =
+    _measurement_member_name(r, swath, p.polarization, p.path)
+
+# The name of a zip's measurement raster for one subswath and polarization; `context` names the product in
+# the error for one it does not hold.
+function _measurement_member_name(r::ZipArchive, swath::Integer, polarization::AbstractString, context::AbstractString)
+    id_str = _swath_id(swath, polarization)
     hits = sort!([m.name for m in r.members
                   if occursin("/measurement/", m.name) && occursin(id_str, m.name) && endswith(m.name, ".tiff")])
     isempty(hits) && throw(ArgumentError(
-        "`$(p.path)` has no measurement raster for subswath IW$swath polarization $(uppercase(p.polarization))"))
+        "`$context` has no measurement raster for subswath IW$swath polarization $(uppercase(polarization))"))
     return only(hits)
 end

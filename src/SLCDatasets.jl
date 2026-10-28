@@ -40,7 +40,7 @@ import DiskArrays
 using ChunkManifests: H5File, HTTPTransport, LeafTransport, LocalTransport, S3Transport, TypedArray,
                       h5_attr_string, h5_dims, h5_exists, h5_isgroup, h5_open_array, h5_read, h5_read_elements, h5_read_strings, h5open_typed,
                       http_request, http_resolve, fetchall, fetchranges, objectsize, ByteRange,
-                      open_tiff, ZipMember, zip_members, read_member, extract_member
+                      open_tiff, ZipMember, zip_members, read_member, extract_member, inflate_ranges!
 using Dates: DateTime
 import EzXML
 using EzXML: parsexml, readxml, root, findfirst, findall, nodecontent, nodename, eachelement
@@ -59,6 +59,7 @@ export SLC, SLCSeries, Identification, RadarGeometry, StateVectors
 export Sentinel1Product, subswath_borders, prefetch_rasters
 export LocalFile, RemoteHTTP, RemoteS3, earthdata_token
 export AsfBurst, asf_bursts, asf_safe_name, is_asf_burst_url
+export ZipBurst, zip_bursts, zip_burst_spec, is_zip_burst_spec, burst_footprints
 # `grid` stays unexported for the reason `LookSide` does: a raster or geometry package consuming this one
 # defines its own, and exporting both makes the name ambiguous at every call site. `GeocodedProduct`
 # carries it as a field, and `geocoded_grid` reads one from a backend.
@@ -73,8 +74,9 @@ include("types.jl")
 include("measurement.jl")
 include("zipped.jl")
 include("nisar.jl")
-# `extractor.jl` before `sentinel1.jl`: a product assembled from extracted bursts holds them.
+# `extractor.jl` and `zipburst.jl` before `sentinel1.jl`: a product assembled from bursts holds them.
 include("extractor.jl")
+include("zipburst.jl")
 include("sentinel1.jl")
 include("burstgrid.jl")
 include("concatenated.jl")
