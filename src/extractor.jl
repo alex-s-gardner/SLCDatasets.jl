@@ -55,6 +55,12 @@ end
 
 function AsfBurst(slc::AbstractString, swath::Integer, polarization::AbstractString,
                   burst::Integer; dir = nothing)
+    return AsfBurst(String(slc), Int(swath), _check_burst(swath, burst, polarization), Int(burst),
+                    dir === nothing ? nothing : String(dir))
+end
+
+# A burst's subswath and index checked, and its polarization in upper case.
+function _check_burst(swath::Integer, burst::Integer, polarization::AbstractString)
     swath in 1:3 || throw(ArgumentError(
         "Sentinel-1 IW subswaths are 1, 2 and 3; got $swath"))
     burst >= 1 || throw(ArgumentError(
@@ -62,8 +68,7 @@ function AsfBurst(slc::AbstractString, swath::Integer, polarization::AbstractStr
     pol = uppercase(String(polarization))
     pol in ("HH", "HV", "VH", "VV") || throw(ArgumentError(
         "a Sentinel-1 polarization is HH, HV, VH or VV; got `$polarization`"))
-    return AsfBurst(String(slc), Int(swath), pol, Int(burst),
-                    dir === nothing ? nothing : String(dir))
+    return pol
 end
 
 const _ASF_URL = r"^https://sentinel1-burst\.asf\.alaska\.edu/(S1[A-D]_IW_SLC__[0-9A-Z_]+)/IW([1-3])/(HH|HV|VH|VV)/(\d+)\.(tiff|xml)$"
@@ -97,7 +102,9 @@ function asf_burst_url(b::AsfBurst, extension::AbstractString)
     return dir * "/IW" * string(b.swath) * "/" * b.polarization * "/" * file
 end
 
-function _asf_local(b::AsfBurst)
+# Where a burst's raster is kept, however it is fetched: named after its product, subswath, polarization
+# and zero-based index.
+function _burst_local(b)
     file = lowercase(b.polarization) * "-" * string(b.burst - 1) * ".tiff"
     return joinpath(b.dir === nothing ? _scratch_dir() : b.dir, b.slc * "-iw" * string(b.swath) * "-" * file)
 end
@@ -113,6 +120,39 @@ function _scratch_dir()
 end
 
 localpath(b::AsfBurst) = only(asf_rasters([b]))
+
+"""
+    with_claimed(fetch!, paths, what) -> paths
+
+The files `paths`, each fetched by this call or by another already fetching it. `fetch!(todo)` fetches
+`paths[todo]`, the ones neither local nor being fetched; a later caller asking for one of them waits for
+it rather than fetching it again. `what` names the fetch in the error for a file that did not arrive.
+"""
+function with_claimed(fetch!::F, paths::Vector{String}, what::String) where {F}
+    todo = Int[]
+    waits = Base.Event[]
+    @lock _DOWNLOADING_LOCK for k in eachindex(paths)
+        _downloaded(paths[k]) && continue
+        if haskey(_DOWNLOADING, paths[k])
+            push!(waits, _DOWNLOADING[paths[k]])
+        else
+            _DOWNLOADING[paths[k]] = Base.Event()
+            push!(todo, k)
+        end
+    end
+    try
+        isempty(todo) || fetch!(todo)
+    finally
+        @lock _DOWNLOADING_LOCK for k in todo
+            notify(pop!(_DOWNLOADING, paths[k]))
+        end
+    end
+    foreach(wait, waits)
+    for p in paths
+        _downloaded(p) || throw(ErrorException(what * " `" * p * "` failed in the task that started it"))
+    end
+    return paths
+end
 
 # How long to keep asking. The extractor answers `202` while it builds a burst, which takes a minute or
 # two; a request that never succeeds should say so rather than retry forever.
@@ -201,36 +241,14 @@ The local path of each burst's raster, downloading those not already in their di
 downloads are resolved together, then read 16 MiB ranges at a time, several ranges in flight.
 """
 function asf_rasters(bursts::AbstractVector{AsfBurst})
-    paths = [_asf_local(b) for b in bursts]
-    todo = Int[]
-    waits = Base.Event[]
-    @lock _DOWNLOADING_LOCK for k in eachindex(bursts)
-        _downloaded(paths[k]) && continue
-        if haskey(_DOWNLOADING, paths[k])
-            push!(waits, _DOWNLOADING[paths[k]])
-        else
-            _DOWNLOADING[paths[k]] = Base.Event()
-            push!(todo, k)
+    paths = [_burst_local(b) for b in bursts]
+    return with_claimed(paths, "downloading") do todo
+        signed = asf_resolve([asf_burst_url(bursts[k], "tiff") for k in todo])
+        for (k, url) in zip(todo, signed)
+            mkpath(dirname(paths[k]))
+            _download(url, paths[k])
         end
     end
-    try
-        if !isempty(todo)
-            signed = asf_resolve([asf_burst_url(bursts[k], "tiff") for k in todo])
-            for (k, url) in zip(todo, signed)
-                mkpath(dirname(paths[k]))
-                _download(url, paths[k])
-            end
-        end
-    finally
-        @lock _DOWNLOADING_LOCK for k in todo
-            notify(pop!(_DOWNLOADING, paths[k]))
-        end
-    end
-    foreach(wait, waits)
-    for p in paths
-        _downloaded(p) || throw(ErrorException("downloading `$p` failed in the task that started it"))
-    end
-    return paths
 end
 
 # The rasters being downloaded, which a second caller waits for rather than downloads again.

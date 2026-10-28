@@ -360,7 +360,6 @@ end
 _parent_subswath(b::AsfBurst) = asf_subswath(b)
 _parent_subswath(b::ZipBurst) = zip_subswath(b)
 _burst_label(b::AsfBurst) = "`" * asf_burst_url(b, "tiff") * "`"
-_burst_label(b::ZipBurst) = _zip_burst_label(b)
 # Every parent product's metadata at once: an extracted burst's is one request per product, made together.
 _fetch_annotations(bursts::AbstractVector{AsfBurst}) = (asf_metadata(bursts); nothing)
 _fetch_annotations(::AbstractVector{ZipBurst}) = nothing
@@ -375,12 +374,7 @@ burst_files(bursts::AbstractVector{AsfBurst}) = asf_rasters(bursts)
 burst_files(bursts::AbstractVector{ZipBurst}) = zip_rasters(bursts)
 
 # An assembled product's measurement raster for one subswath: its bursts, fetched, stacked.
-# A branch per burst type, so each call below has one concrete argument type.
-function _stacked_measurement(p::Sentinel1Product, swath::Integer)
-    bursts = p.bursts
-    bursts isa Vector{Vector{AsfBurst}} && return _stacked_measurement(p, bursts, swath)
-    return _stacked_measurement(p, bursts::Vector{Vector{ZipBurst}}, swath)
-end
+_stacked_measurement(p::Sentinel1Product, swath::Integer) = _stacked_measurement(p, p.bursts, swath)
 
 function _stacked_measurement(p::Sentinel1Product, groups::Vector{Vector{B}}, swath::Integer) where {B}
     a = annotation(p, swath)
@@ -402,13 +396,45 @@ function _stacked_measurement(p::Sentinel1Product, groups::Vector{Vector{B}}, sw
 end
 
 # ---------------------------------------------------------------------------
-# Bursts of an SLC zip
+# The annotations and footprints of an SLC zip's bursts
 # ---------------------------------------------------------------------------
 
-# Each zip's subswath annotations as parsed, so a zip's annotation is read once per subswath however many
-# of its bursts are named.
-const _ZIP_ANNOTATIONS = Dict{Tuple{String,String,Int},SubswathAnnotation}()
+"""
+    BurstFootprint
+
+One burst's `azimuthAnxTime`, the seconds from the orbit's ascending node to its start, and its footprint
+as a closed ring of `(longitude, latitude)` vertices.
+"""
+const BurstFootprint = @NamedTuple{anx_time::Float64, ring::Vector{NTuple{2,Float64}}}
+
+# Each zip's subswath annotation documents as read, so a zip's annotation is fetched once per subswath
+# however many of its bursts are named, and its parsed annotation and footprints as each is first asked for.
+const _ZIP_ANNOTATIONS = Dict{Tuple{String,String,Int},String}()
+const _ZIP_SUBSWATHS = Dict{Tuple{String,String,Int},SubswathAnnotation}()
+const _ZIP_FOOTPRINTS = Dict{Tuple{String,String,Int},Vector{BurstFootprint}}()
 const _ZIP_ANNOTATIONS_LOCK = ReentrantLock()
+
+function _zip_annotation_xml(key::Tuple{String,String,Int})
+    @lock _ZIP_ANNOTATIONS_LOCK begin
+        hit = get(_ZIP_ANNOTATIONS, key, nothing)
+        hit === nothing || return hit
+    end
+    zip, pol, swath = key
+    xml = with_annotations(r -> read_annotation_entry(r, swath, pol), zip)
+    @lock _ZIP_ANNOTATIONS_LOCK _ZIP_ANNOTATIONS[key] = xml
+    return xml
+end
+
+# `cache[key]`, computed by `f(xml)` from the subswath's annotation document the first time.
+function _zip_parsed(f::F, cache::Dict{Tuple{String,String,Int},T}, key::Tuple{String,String,Int}) where {F,T}
+    @lock _ZIP_ANNOTATIONS_LOCK begin
+        hit = get(cache, key, nothing)
+        hit === nothing || return hit
+    end
+    v = f(_zip_annotation_xml(key))::T
+    @lock _ZIP_ANNOTATIONS_LOCK cache[key] = v
+    return v
+end
 
 """
     zip_subswath(b::ZipBurst) -> SubswathAnnotation
@@ -416,16 +442,8 @@ const _ZIP_ANNOTATIONS_LOCK = ReentrantLock()
 The annotation of the subswath `b` lies in — every burst of the subswath, not only `b` — read from the
 zip's annotation member.
 """
-function zip_subswath(b::ZipBurst)
-    key = (b.zip, b.polarization, b.swath)
-    @lock _ZIP_ANNOTATIONS_LOCK begin
-        a = get(_ZIP_ANNOTATIONS, key, nothing)
-        a === nothing || return a
-    end
-    a = with_annotations(r -> read_annotation(read_annotation_entry(r, b.swath, b.polarization), b.swath), b.zip)
-    @lock _ZIP_ANNOTATIONS_LOCK _ZIP_ANNOTATIONS[key] = a
-    return a
-end
+zip_subswath(b::ZipBurst) =
+    _zip_parsed(xml -> read_annotation(xml, b.swath), _ZIP_SUBSWATHS, (b.zip, b.polarization, b.swath))
 
 """
     zip_bursts(zip; polarization, swaths = 1:3, dir = nothing) -> Vector{ZipBurst}
@@ -442,21 +460,24 @@ function zip_bursts(zip::AbstractString; polarization::AbstractString, swaths = 
 end
 
 """
-    burst_footprints(path, swath, polarization) -> Vector{@NamedTuple{anx_time::Float64, ring::Vector{NTuple{2,Float64}}}}
+    burst_footprints(zip, swath, polarization) -> Vector{BurstFootprint}
 
-Each burst of one subswath of the SAFE product at `path` (a `.SAFE` or its zip): its `azimuthAnxTime`,
-the seconds from the orbit's ascending node to the burst's start, and its footprint as a closed ring of
-`(longitude, latitude)` vertices, the annotation's geolocation grid along the burst's first line and then
-back along its last.
+Each burst of one subswath of the SLC zip at `zip`: its `azimuthAnxTime`, the seconds from the orbit's
+ascending node to the burst's start, and its footprint as a closed ring of `(longitude, latitude)`
+vertices, the annotation's geolocation grid along the burst's first line and then back along its last.
+The annotation is read once, and serves [`zip_subswath`](@ref) too.
 
 A burst of one track and subswath starts the same time after the ascending node on every pass, to well
 under a burst's length, which is what makes `anx_time` the burst's identity across passes. The grid's lines
 fall on burst boundaries — line `(k - 1) L` begins burst `k`, and its last line is the subswath's last —
 so each burst's ring is two rows of it, which this checks.
 """
-function burst_footprints(path::AbstractString, swath::Integer, polarization::AbstractString)
-    xml = with_annotations(r -> read_annotation_entry(r, swath, polarization), path)
-    doc = root(parsexml(xml))
+function burst_footprints(zip::AbstractString, swath::Integer, polarization::AbstractString)
+    key = (String(zip), uppercase(String(polarization)), Int(swath))
+    return _zip_parsed(xml -> _footprints(root(parsexml(xml)), key[3], key[1]), _ZIP_FOOTPRINTS, key)
+end
+
+function _footprints(doc::EzXML.Node, swath::Int, path::String)
     L = _findint(doc, "swathTiming/linesPerBurst")
     anx = Float64[_findfloat(b, "azimuthAnxTime") for b in findall("swathTiming/burstList/burst", doc)]
     n = length(anx)
@@ -475,5 +496,5 @@ function burst_footprints(path::AbstractString, swath::Integer, polarization::Ab
         v = NTuple{2,Float64}[(x[2], x[3]) for x in vcat(top, bottom)]
         push!(v, first(v))
     end
-    return [(; anx_time = anx[k], ring = ring(k)) for k in 1:n]
+    return BurstFootprint[(; anx_time = anx[k], ring = ring(k)) for k in 1:n]
 end

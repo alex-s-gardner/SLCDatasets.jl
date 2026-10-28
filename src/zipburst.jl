@@ -19,7 +19,7 @@ path, an `https://` URL or an `s3://` URI — in `polarization`.
 The raster is inflated out of the zip into `dir` when it is first read, a temporary directory by
 default; a raster already there is not read again. [`zip_bursts`](@ref) lists every burst of a zip.
 """
-struct ZipBurst <: AbstractSLCSource
+struct ZipBurst
     zip::String
     slc::String
     swath::Int
@@ -30,12 +30,7 @@ end
 
 function ZipBurst(zip::AbstractString, swath::Integer, polarization::AbstractString, burst::Integer;
                   dir = nothing)
-    swath in 1:3 || throw(ArgumentError("Sentinel-1 IW subswaths are 1, 2 and 3; got $swath"))
-    burst >= 1 || throw(ArgumentError("bursts are numbered from 1, so burst $burst does not exist"))
-    pol = uppercase(String(polarization))
-    pol in ("HH", "HV", "VH", "VV") || throw(ArgumentError(
-        "a Sentinel-1 polarization is HH, HV, VH or VV; got `$polarization`"))
-    return ZipBurst(String(zip), _zip_product_name(zip), Int(swath), pol, Int(burst),
+    return ZipBurst(String(zip), _zip_product_name(zip), Int(swath), _check_burst(swath, burst, polarization), Int(burst),
                     dir === nothing ? nothing : String(dir))
 end
 
@@ -74,14 +69,8 @@ function _zip_product_name(zip::AbstractString)
     return String(something(m.captures[1]))
 end
 
-_zip_burst_label(b::ZipBurst) = "burst " * string(b.burst) * " of IW" * string(b.swath) * " " * b.polarization *
-                                " of `" * b.zip * "`"
-
-# Named as an extracted burst's raster is (`_asf_local`), with the burst counted from zero.
-function _zip_local(b::ZipBurst)
-    file = lowercase(b.polarization) * "-" * string(b.burst - 1) * ".tiff"
-    return joinpath(b.dir === nothing ? _scratch_dir() : b.dir, b.slc * "-iw" * string(b.swath) * "-" * file)
-end
+_burst_label(b::ZipBurst) = "burst " * string(b.burst) * " of IW" * string(b.swath) * " " * b.polarization *
+                            " of `" * b.zip * "`"
 
 """
     zip_rasters(bursts::AbstractVector{ZipBurst}) -> Vector{String}
@@ -91,19 +80,8 @@ member is inflated once for all its bursts, from its start to the end of the las
 are inflated concurrently.
 """
 function zip_rasters(bursts::AbstractVector{ZipBurst})
-    paths = [_zip_local(b) for b in bursts]
-    todo = Int[]
-    waits = Base.Event[]
-    @lock _DOWNLOADING_LOCK for k in eachindex(bursts)
-        _downloaded(paths[k]) && continue
-        if haskey(_DOWNLOADING, paths[k])
-            push!(waits, _DOWNLOADING[paths[k]])
-        else
-            _DOWNLOADING[paths[k]] = Base.Event()
-            push!(todo, k)
-        end
-    end
-    try
+    paths = [_burst_local(b) for b in bursts]
+    return with_claimed(paths, "inflating") do todo
         groups = Dict{Tuple{String,Int,String},Vector{Int}}()
         for k in todo
             push!(get!(Vector{Int}, groups, (bursts[k].zip, bursts[k].swath, bursts[k].polarization)), k)
@@ -119,39 +97,32 @@ function zip_rasters(bursts::AbstractVector{ZipBurst})
             end
         end
         failed === nothing || throw(failed)
-    finally
-        @lock _DOWNLOADING_LOCK for k in todo
-            notify(pop!(_DOWNLOADING, paths[k]))
-        end
     end
-    foreach(wait, waits)
-    for p in paths
-        _downloaded(p) || throw(ErrorException("inflating `$p` failed in the task that started it"))
-    end
-    return paths
 end
 
 # How much of a measurement member's head is read for its layout: its first directory and the strip
 # tables that directory's values point to, a few hundred kilobytes at most.
-const _ZIP_TIFF_HEAD = 1 << 20
+const _ZIP_TIFF_HEAD = 512 << 10
 
 # Bursts of one subswath member, written to `dests`.
-function _inflate_bursts(bs::Vector{ZipBurst}, dests::Vector{String})
+function _inflate_bursts(bursts::Vector{ZipBurst}, paths::Vector{String})
+    # In burst order, as the ranges are inflated.
+    order = sortperm([x.burst for x in bursts])
+    bs, dests = bursts[order], paths[order]
     b = first(bs)
-    r = ZipArchive(b.zip)
-    m = _member(r, _zip_measurement_member(r, b.swath, b.polarization))
     a = zip_subswath(b)
     L, S, N = a.lines_per_burst, a.samples_per_burst, nbursts(a)
+    for x in bs
+        1 <= x.burst <= N || throw(ArgumentError(
+            "subswath IW$(b.swath) of `$(b.zip)` has $N bursts, so burst $(x.burst) does not exist"))
+    end
+    r = ZipArchive(b.zip)
+    m = _member(r, _measurement_member_name(r, b.swath, b.polarization, r.uri))
     head = read_member(r.source, m, 0, min(_ZIP_TIFF_HEAD, m.uncompressed); transport = r.transport)
     D = _measurement_data_offset(head, L, S, N, b.zip * " " * m.name)
-    order = sortperm([x.burst for x in bs])
     nb = 4 * L * S
-    for k in order
-        1 <= bs[k].burst <= N || throw(ArgumentError(
-            "subswath IW$(b.swath) of `$(b.zip)` has $N bursts, so burst $(bs[k].burst) does not exist"))
-    end
-    ranges = [(D + (bs[k].burst - 1) * nb, nb) for k in order]
-    parts = [dests[k] * ".part" for k in order]
+    ranges = [(D + (x.burst - 1) * nb, nb) for x in bs]
+    parts = [d * ".part" for d in dests]
     ios = IOStream[]
     try
         for p in parts
@@ -164,19 +135,10 @@ function _inflate_bursts(bs::Vector{ZipBurst}, dests::Vector{String})
     finally
         foreach(close, ios)
     end
-    for (j, k) in enumerate(order)
-        mv(parts[j], dests[k]; force = true)
+    for (p, d) in zip(parts, dests)
+        mv(p, d; force = true)
     end
-    return dests
-end
-
-function _zip_measurement_member(r::ZipArchive, swath::Integer, polarization::AbstractString)
-    id_str = _swath_id(swath, polarization)
-    hits = sort!([m.name for m in r.members
-                  if occursin("/measurement/", m.name) && occursin(id_str, m.name) && endswith(m.name, ".tiff")])
-    isempty(hits) && throw(ArgumentError(
-        "`$(r.uri)` has no measurement raster for subswath IW$swath polarization $(uppercase(polarization))"))
-    return only(hits)
+    return paths
 end
 
 _le32(b::Vector{UInt8}, i::Int) = Int(b[i]) | Int(b[i + 1]) << 8 | Int(b[i + 2]) << 16 | Int(b[i + 3]) << 24
@@ -266,4 +228,3 @@ function _write_burst_tiff_header(io::IO, L::Int, S::Int)
     end
     return io
 end
-

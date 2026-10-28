@@ -1047,9 +1047,7 @@ it is fetching; a `.SAFE`'s rasters are local already.
 """
 function prefetch_rasters(p::Sentinel1Product)
     if !isempty(p.bursts)
-        bursts = p.bursts
-        bursts isa Vector{Vector{AsfBurst}} ? burst_files(reduce(vcat, bursts)) :
-                                             burst_files(reduce(vcat, bursts::Vector{Vector{ZipBurst}}))
+        burst_files(reduce(vcat, p.bursts))
     elseif !isdir(p.path)
         _zipped_measurement(p, first(p.swaths))
     end
@@ -1066,11 +1064,16 @@ function _zipped_measurement(p::Sentinel1Product, swath::Integer)
     return (file, open_measurement(file))
 end
 
-function _measurement_member(p::Sentinel1Product, r::ZipArchive, swath::Int)
-    id_str = _swath_id(swath, p.polarization)
+_measurement_member(p::Sentinel1Product, r::ZipArchive, swath::Int) =
+    _measurement_member_name(r, swath, p.polarization, p.path)
+
+# The name of a zip's measurement raster for one subswath and polarization; `context` names the product in
+# the error for one it does not hold.
+function _measurement_member_name(r::ZipArchive, swath::Integer, polarization::AbstractString, context::AbstractString)
+    id_str = _swath_id(swath, polarization)
     hits = sort!([m.name for m in r.members
                   if occursin("/measurement/", m.name) && occursin(id_str, m.name) && endswith(m.name, ".tiff")])
     isempty(hits) && throw(ArgumentError(
-        "`$(p.path)` has no measurement raster for subswath IW$swath polarization $(uppercase(p.polarization))"))
+        "`$context` has no measurement raster for subswath IW$swath polarization $(uppercase(polarization))"))
     return only(hits)
 end
