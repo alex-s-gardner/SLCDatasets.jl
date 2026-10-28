@@ -483,9 +483,9 @@ struct Sentinel1Product
     # sorted ascending, which is what makes the first entry the near-range subswath of a mosaic.
     swaths::Vector{Int}
     annotations::Vector{SubswathAnnotation}
-    # For a product assembled from extracted bursts, `bursts[i]` are subswath `swaths[i]`'s bursts in
-    # azimuth order, and `path` is the product's name; empty for a `.SAFE` or a zip.
-    bursts::Vector{Vector{AsfBurst}}
+    # For a product assembled from bursts, `bursts[i]` are subswath `swaths[i]`'s bursts in azimuth
+    # order, and `path` is the product's name; empty for a `.SAFE` or a zip.
+    bursts::Union{Vector{Vector{AsfBurst}},Vector{Vector{ZipBurst}}}
     # Where a zipped product's measurement rasters are inflated; `nothing` for a temporary directory.
     dir::Union{Nothing,String}
 end
@@ -1047,7 +1047,7 @@ it is fetching; a `.SAFE`'s rasters are local already.
 """
 function prefetch_rasters(p::Sentinel1Product)
     if !isempty(p.bursts)
-        asf_rasters(reduce(vcat, p.bursts))
+        burst_files(reduce(vcat, p.bursts))
     elseif !isdir(p.path)
         _zipped_measurement(p, first(p.swaths))
     end

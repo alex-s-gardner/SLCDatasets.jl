@@ -14,6 +14,7 @@ include("tiff_fixture.jl")
     @time @testset "burst grid" begin include("burstgrid.jl") end
     @time @testset "merged bursts" begin include("merge.jl") end
     @time @testset "ASF bursts" begin include("asf.jl") end
+    @time @testset "SLC zip bursts" begin include("zipburst.jl") end
     @time @testset "access layer" begin include("remote.jl") end
     @time @testset "pairing" begin include("pairing.jl") end
     @time @testset "TOPS mode" begin include("tops.jl") end
