@@ -375,13 +375,20 @@ burst_files(bursts::AbstractVector{AsfBurst}) = asf_rasters(bursts)
 burst_files(bursts::AbstractVector{ZipBurst}) = zip_rasters(bursts)
 
 # An assembled product's measurement raster for one subswath: its bursts, fetched, stacked.
+# A branch per burst type, so each call below has one concrete argument type.
 function _stacked_measurement(p::Sentinel1Product, swath::Integer)
+    bursts = p.bursts
+    bursts isa Vector{Vector{AsfBurst}} && return _stacked_measurement(p, bursts, swath)
+    return _stacked_measurement(p, bursts::Vector{Vector{ZipBurst}}, swath)
+end
+
+function _stacked_measurement(p::Sentinel1Product, groups::Vector{Vector{B}}, swath::Integer) where {B}
     a = annotation(p, swath)
-    bs = p.bursts[findfirst(==(Int(swath)), p.swaths)]
+    bs = groups[findfirst(==(Int(swath)), p.swaths)]
     rasters = MeasurementRaster[]
-    # The first read downloads every subswath's rasters, as a zip's first read inflates every subswath:
-    # requested together, they are generated together and download back to back.
-    every = reduce(vcat, p.bursts)
+    # The first read fetches every subswath's rasters, as a zip's first read inflates every subswath:
+    # requested together, extracted bursts are generated together and download back to back.
+    every = reduce(vcat, groups)
     files = burst_files(every)
     for b in bs
         file = files[something(findfirst(==(b), every))]
@@ -435,20 +442,24 @@ function zip_bursts(zip::AbstractString; polarization::AbstractString, swaths = 
 end
 
 """
-    burst_footprints(path, swath, polarization) -> Vector{Vector{NTuple{2,Float64}}}
+    burst_footprints(path, swath, polarization) -> Vector{@NamedTuple{anx_time::Float64, ring::Vector{NTuple{2,Float64}}}}
 
-The footprint of each burst of one subswath of the SAFE product at `path` (a `.SAFE` or its zip), as a
-closed ring of `(longitude, latitude)` vertices: the annotation's geolocation grid along the burst's first
-line, then back along its last.
+Each burst of one subswath of the SAFE product at `path` (a `.SAFE` or its zip): its `azimuthAnxTime`,
+the seconds from the orbit's ascending node to the burst's start, and its footprint as a closed ring of
+`(longitude, latitude)` vertices, the annotation's geolocation grid along the burst's first line and then
+back along its last.
 
-The grid's lines fall on burst boundaries — line `(k - 1) L` begins burst `k`, and its last line is the
-subswath's last — so each burst's ring is two rows of it, which this checks.
+A burst of one track and subswath starts the same time after the ascending node on every pass, to well
+under a burst's length, which is what makes `anx_time` the burst's identity across passes. The grid's lines
+fall on burst boundaries — line `(k - 1) L` begins burst `k`, and its last line is the subswath's last —
+so each burst's ring is two rows of it, which this checks.
 """
 function burst_footprints(path::AbstractString, swath::Integer, polarization::AbstractString)
     xml = with_annotations(r -> read_annotation_entry(r, swath, polarization), path)
     doc = root(parsexml(xml))
     L = _findint(doc, "swathTiming/linesPerBurst")
-    n = length(findall("swathTiming/burstList/burst", doc))
+    anx = Float64[_findfloat(b, "azimuthAnxTime") for b in findall("swathTiming/burstList/burst", doc)]
+    n = length(anx)
     rows = Dict{Int,Vector{Tuple{Int,Float64,Float64}}}()
     for p in findall("geolocationGrid/geolocationGridPointList/geolocationGridPoint", doc)
         push!(get!(Vector{Tuple{Int,Float64,Float64}}, rows, _findint(p, "line")),
@@ -464,5 +475,5 @@ function burst_footprints(path::AbstractString, swath::Integer, polarization::Ab
         v = NTuple{2,Float64}[(x[2], x[3]) for x in vcat(top, bottom)]
         push!(v, first(v))
     end
-    return [ring(k) for k in 1:n]
+    return [(; anx_time = anx[k], ring = ring(k)) for k in 1:n]
 end

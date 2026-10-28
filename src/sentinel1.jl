@@ -1042,12 +1042,14 @@ end
     prefetch_rasters(p::Sentinel1Product) -> Sentinel1Product
 
 Make every measurement raster of `p` local now rather than at its first read: a zip's members inflated, an
-assembled product's bursts downloaded. Safe to run in a task beside other reads of `p`, which wait for what
+assembled product's bursts downloaded or inflated out of their zips. Safe to run in a task beside other reads of `p`, which wait for what
 it is fetching; a `.SAFE`'s rasters are local already.
 """
 function prefetch_rasters(p::Sentinel1Product)
     if !isempty(p.bursts)
-        burst_files(reduce(vcat, p.bursts))
+        bursts = p.bursts
+        bursts isa Vector{Vector{AsfBurst}} ? burst_files(reduce(vcat, bursts)) :
+                                             burst_files(reduce(vcat, bursts::Vector{Vector{ZipBurst}}))
     elseif !isdir(p.path)
         _zipped_measurement(p, first(p.swaths))
     end

@@ -39,6 +39,32 @@ function ZipBurst(zip::AbstractString, swath::Integer, polarization::AbstractStr
                     dir === nothing ? nothing : String(dir))
 end
 
+const _ZIP_BURST_SPEC = r"^(.*\.zip)#IW([1-3])/(HH|HV|VH|VV)/(\d+)$"
+
+"""
+    ZipBurst(spec; dir = nothing) -> ZipBurst
+    zip_burst_spec(b::ZipBurst) -> String
+
+A burst named as `<zip>#IW<n>/<POL>/<index>`: the zip's location, then the subswath, polarization and
+index the extractor's URL for the same burst ends with — counted from zero, as there.
+"""
+function ZipBurst(spec::AbstractString; dir = nothing)
+    m = match(_ZIP_BURST_SPEC, spec)
+    m === nothing && throw(ArgumentError(
+        "`$spec` does not name a burst of an SLC zip; one reads `<SLC zip>#IW<1-3>/<HH|HV|VH|VV>/<index>`"))
+    return ZipBurst(something(m.captures[1]), parse(Int, something(m.captures[2])), something(m.captures[3]),
+                    parse(Int, something(m.captures[4])) + 1; dir)
+end
+
+zip_burst_spec(b::ZipBurst) = b.zip * "#IW" * string(b.swath) * "/" * b.polarization * "/" * string(b.burst - 1)
+
+"""
+    is_zip_burst_spec(s) -> Bool
+
+Whether `s` names a burst of an SLC zip as [`ZipBurst`](@ref) reads one.
+"""
+is_zip_burst_spec(s::AbstractString) = occursin(_ZIP_BURST_SPEC, s)
+
 # The product a zip holds, from its file name: `S1A_IW_SLC__1SDV_…_D6DE.zip` holds `S1A_IW_SLC__1SDV_…_D6DE`.
 function _zip_product_name(zip::AbstractString)
     base = String(zip[(_last_slash(zip) + 1):end])

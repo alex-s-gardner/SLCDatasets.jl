@@ -59,7 +59,7 @@ export SLC, SLCSeries, Identification, RadarGeometry, StateVectors
 export Sentinel1Product, subswath_borders, prefetch_rasters
 export LocalFile, RemoteHTTP, RemoteS3, earthdata_token
 export AsfBurst, asf_bursts, asf_safe_name, is_asf_burst_url
-export ZipBurst, zip_bursts, burst_footprints
+export ZipBurst, zip_bursts, zip_burst_spec, is_zip_burst_spec, burst_footprints
 # `grid` stays unexported for the reason `LookSide` does: a raster or geometry package consuming this one
 # defines its own, and exporting both makes the name ambiguous at every call site. `GeocodedProduct`
 # carries it as a field, and `geocoded_grid` reads one from a backend.

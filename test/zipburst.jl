@@ -139,8 +139,14 @@ if !isempty(S1_PRODUCTS)
             @test r[:, :] == rasters[2][(L[2] + 1):(3L[2]), :]
             @test q.path == asf_safe_name(picked)
 
-            @test_throws "does not have a row at each" burst_footprints(zp, 2, pol)
+            # The fixture's annotations carry neither burst times from the ascending node nor a grid.
+            @test_throws "no `azimuthAnxTime` element" burst_footprints(zp, 2, pol)
 
+            spec = zip_burst_spec(picked[1])
+            @test spec == zp * "#IW2/$(uppercase(pol))/2" && is_zip_burst_spec(spec)
+            @test ZipBurst(spec; dir = out) == picked[1]
+            @test !is_zip_burst_spec(zp) && !is_zip_burst_spec(zp * "#IW4/HH/0")
+            @test_throws "does not name a burst of an SLC zip" ZipBurst(zp * "#IW1/HH")
             @test_throws "not a Sentinel-1 IW SLC zip" ZipBurst(joinpath(dir, "x.zip"), 1, pol, 1)
             @test_throws "has $n bursts, so burst 5" burst_files([ZipBurst(zp, 1, pol, 5; dir = out)])
             @test_throws "not consecutive" Sentinel1Product([ZipBurst(zp, 1, pol, 1), ZipBurst(zp, 1, pol, 3)];
