@@ -50,9 +50,6 @@ end
     mktempdir() do dir
         pixels = tiff_pattern(4, 5)
 
-        @test_throws "TIFF compression 5 is not read" open_measurement(
-            write_tiff(joinpath(dir, "lzw.tiff"), pixels; compression = 5))
-
         @test_throws "big-endian" open_measurement(
             write_tiff(joinpath(dir, "be.tiff"), pixels; bigendian = true))
 

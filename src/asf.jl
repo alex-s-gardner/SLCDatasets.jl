@@ -255,8 +255,8 @@ function asf_safe_name(bursts::AbstractVector{<:Union{AsfBurst,ZipBurst}})
 end
 
 # `t` to the whole second as `yyyymmddTHHMMSS`, the form product and burst names carry.
-function _name_time(t::UtcTime)
-    d = t.datetime + Dates.Second(floor(Int, t.seconds))
+function _name_time(t::NanoDate)
+    d = _whole_second(t)
     return _zpad(Dates.year(d), 4) * _zpad(Dates.month(d), 2) * _zpad(Dates.day(d), 2) * "T" *
            _zpad(Dates.hour(d), 2) * _zpad(Dates.minute(d), 2) * _zpad(Dates.second(d), 2)
 end
@@ -290,7 +290,7 @@ function _assembled_swath(bs::Vector{B}, swath::Int) where {B<:Union{AsfBurst,Zi
              $(parents[b.slc].lines_per_burst) lines, the first $lpb"))
     end
     pick(f) = Int[f(parents[b.slc])[b.burst] for b in sorted]
-    starts = UtcTime[start(b) for b in sorted]
+    starts = NanoDate[start(b) for b in sorted]
     span_end = maximum(k -> _advance(starts[k], (lpb - 1) * parents[sorted[k].slc].azimuth_time_interval),
                        eachindex(sorted))
     lists(f) = [f(parents[p]) for p in order]
@@ -311,9 +311,12 @@ function _merged(lists::Vector{Vector{RangePolynomial}})
     nonempty = sort!(filter(!isempty, lists); by = l -> first(l).time)
     isempty(nonempty) && return RangePolynomial[]
     out = copy(first(nonempty))
+    # Each `filter` captures that pass's own bound: a closure over the reassigned `latest` would box it,
+    # which `juliac --trim` cannot compile.
     latest = maximum(p -> p.time, out)
     for l in nonempty[2:end]
-        keep = filter(p -> latest < p.time, l)
+        bound = latest
+        keep = filter(p -> bound < p.time, l)
         isempty(keep) && continue
         append!(out, keep)
         latest = maximum(p -> p.time, keep)
@@ -322,7 +325,7 @@ function _merged(lists::Vector{Vector{RangePolynomial}})
 end
 
 # The estimates strictly within `buffer` seconds of `[lo, hi]`.
-_within(list::Vector{RangePolynomial}, lo::UtcTime, hi::UtcTime, buffer::Float64) =
+_within(list::Vector{RangePolynomial}, lo::NanoDate, hi::NanoDate, buffer::Float64) =
     filter(p -> seconds_between(lo, p.time) > -buffer && seconds_between(p.time, hi) > -buffer, list)
 
 """

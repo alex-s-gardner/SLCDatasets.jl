@@ -16,7 +16,7 @@ using SLCDatasets
 using SLCDatasets: MergedBurstBackend, ConcatenatedBursts, BurstValidMask, Amplitude,
            BurstGrid, BurstPlacement,
                    read_annotation, annotation_xml, burst_grid, measurement_path, open_measurement,
-                   Sentinel1Product, UtcTime, seconds_between, valid_lines, valid_samples,
+                   Sentinel1Product, seconds_between, valid_lines, valid_samples,
                    MAX_BURST_GRID_RESIDUAL, grid, safe_polarizations
 using Test
 
@@ -105,10 +105,10 @@ if !isempty(S1_PRODUCTS)
         @test !isapprox(raw, elapsed; atol = 1.0)
 
         # Every burst's start, as an instant, must be the instant the merged grid puts its first row at.
-        origin = UtcTime(g.epoch, g.sensing_start)
+        origin = SLCDatasets._advance(NanoDate(g.epoch), g.sensing_start)
         for pl in grid(m).placements
             burst = b[pl.burst]
-            start = UtcTime(burst.geometry.epoch, burst.geometry.sensing_start)
+            start = SLCDatasets._advance(NanoDate(burst.geometry.epoch), burst.geometry.sensing_start)
             row = first(pl.grid_rows) - (first(pl.burst_rows) - 1)
             @test seconds_between(origin, start) ≈ (row - 1) * dt atol = 1e-6
         end

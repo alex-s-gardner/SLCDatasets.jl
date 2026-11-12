@@ -95,7 +95,7 @@ term is the polynomial's value at `r0`. The annotation writes that reference as 
 which is why the parse multiplies by `c/2`.
 """
 struct RangePolynomial
-    time::UtcTime
+    time::NanoDate
     r0::Float64
     coeffs::NTuple{3,Float64}
 end
@@ -104,7 +104,7 @@ end
 (p::RangePolynomial)(range::Real) = evalpoly(Float64(range) - p.r0, p.coeffs)
 
 """
-    nearest_polynomial(polys, t::UtcTime) -> RangePolynomial
+    nearest_polynomial(polys, t::NanoDate) -> RangePolynomial
 
 The polynomial estimated closest in azimuth time to `t`.
 
@@ -113,7 +113,7 @@ How a burst selects its azimuth FM rate and Doppler centroid, following `s1reade
 burst, and the entry nearest the burst's own mid-time applies to it. Ties take the earlier entry, as a scan
 keeping the strict minimum does.
 """
-function nearest_polynomial(polys::AbstractVector{RangePolynomial}, t::UtcTime)
+function nearest_polynomial(polys::AbstractVector{RangePolynomial}, t::NanoDate)
     isempty(polys) && throw(ArgumentError(
         "the annotation lists no polynomials, so none can be selected for " * _utc_string(t)))
     best = firstindex(polys)
@@ -160,7 +160,7 @@ struct DerampParameters
     starting_range::Float64
     range_pixel_spacing::Float64
     lines_per_burst::Int
-    burst_mid::UtcTime
+    burst_mid::NanoDate
 end
 
 """
@@ -255,11 +255,9 @@ source_transport(::AbstractSLCSource) = nothing
 
 What an acquisition is: mission, product, orbit and coverage.
 
-`start_time` and `stop_time` are the zero-Doppler bounds. They are kept as the product's own strings
-because those carry nanoseconds, which `DateTime`'s millisecond resolution would silently drop;
-[`start_datetime`](@ref) and [`stop_datetime`](@ref) convert when millisecond truncation is
-acceptable. The full-precision bounds the geometry uses are `sensing_start` and `sensing_stop` on
-[`RadarGeometry`](@ref), in seconds against its `epoch`.
+`start_time` and `stop_time` are the zero-Doppler bounds, to the nanosecond the product records them
+at. The bounds the geometry uses are `sensing_start` and `sensing_stop` on [`RadarGeometry`](@ref), in
+seconds against its `epoch`.
 """
 struct Identification
     mission::String
@@ -267,30 +265,10 @@ struct Identification
     absolute_orbit::Int
     pass_direction::String
     look_direction::String
-    start_time::String
-    stop_time::String
+    start_time::NanoDate
+    stop_time::NanoDate
     bounding_polygon::String
 end
-
-"""
-    start_datetime(id::Identification) -> DateTime
-
-The acquisition's zero-Doppler start as a `DateTime`, truncated to milliseconds.
-
-The product records it to nanoseconds. Use `id.start_time` for the exact string, or
-[`RadarGeometry`](@ref)'s `sensing_start` for full-precision arithmetic.
-"""
-start_datetime(id::Identification) = _truncated_datetime(id.start_time)
-
-"""
-    stop_datetime(id::Identification) -> DateTime
-
-The acquisition's zero-Doppler end as a `DateTime`, truncated to milliseconds.
-
-The counterpart of [`start_datetime`](@ref), with the same caveat: the product records it to
-nanoseconds, and `RadarGeometry`'s `sensing_stop` carries the full precision.
-"""
-stop_datetime(id::Identification) = _truncated_datetime(id.stop_time)
 
 """
     RadarGeometry
@@ -339,11 +317,11 @@ The intermediate a reader produces before an epoch is chosen: [`StateVectors`](@
 vectors with their times reduced to seconds against one epoch. The three fields are index-matched.
 """
 struct StateVectorTable
-    time::Vector{UtcTime}
+    time::Vector{NanoDate}
     position::Vector{SVector{3,Float64}}
     velocity::Vector{SVector{3,Float64}}
 
-    function StateVectorTable(time::Vector{UtcTime}, position::Vector{SVector{3,Float64}},
+    function StateVectorTable(time::Vector{NanoDate}, position::Vector{SVector{3,Float64}},
                               velocity::Vector{SVector{3,Float64}})
         axes(time) == axes(position) == axes(velocity) || throw(DimensionMismatch(
             "state vector times, positions and velocities must be index-matched: got axes " *
@@ -492,7 +470,7 @@ function Base.show(io::IO, ::MIME"text/plain", s::SLC)
     println(io, "SAR acquisition")
     println(io, "  mission        : ", id.mission, " (", id.product_type, ")")
     println(io, "  absolute orbit : ", id.absolute_orbit, " ", lowercase(id.pass_direction))
-    println(io, "  sensing        : ", id.start_time, " to ", id.stop_time)
+    println(io, "  sensing        : ", _utc_string(id.start_time), " to ", _utc_string(id.stop_time))
     println(io, "  size           : ", g.nlines, " lines x ", g.nsamples, " samples")
     println(io, "  slant range    : ", g.starting_range, " to ", g.far_range, " m")
     println(io, "  look side      : ", g.look_side == LookLeft ? "left" : "right")

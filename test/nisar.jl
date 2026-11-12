@@ -24,11 +24,11 @@ mktempdir() do dir
         @test id.absolute_orbit == FX.identification.absolute_orbit
         @test id.pass_direction == FX.identification.pass_direction
         @test id.look_direction == FX.identification.look_direction
-        # Kept as strings: the product records nanoseconds, which a `DateTime` would silently drop.
-        @test id.start_time == FX.identification.start_time
-        @test id.stop_time == FX.identification.stop_time
-        @test start_datetime(id) == DateTime("2025-10-28T23:52:01.000")
-        @test stop_datetime(id) == DateTime("2025-10-28T23:52:38.999")
+        # To the nanosecond the product records, which a `DateTime` would drop.
+        @test id.start_time == SLCDatasets.parse_utc(FX.identification.start_time)
+        @test id.stop_time == SLCDatasets.parse_utc(FX.identification.stop_time)
+        @test id.start_time.datetime == DateTime("2025-10-28T23:52:01.000")
+        @test id.stop_time.datetime == DateTime("2025-10-28T23:52:38.999")
     end
 
     @testset "geometry is bitwise" begin
@@ -212,6 +212,8 @@ end
         h5open(path, "w") do h
             h["science/LSAR/identification/productType"] = "GSLC"
             h["science/LSAR/identification/absoluteOrbitNumber"] = Int32(1)
+            h["science/LSAR/identification/zeroDopplerStartTime"] = "2025-10-28T23:52:01.000000000"
+            h["science/LSAR/identification/zeroDopplerEndTime"] = "2025-10-28T23:52:38.000000000"
             h["science/LSAR/identification/listOfFrequencies"] = ["A"]
             h["science/LSAR/GSLC/grids/frequencyA/x"] = [0.0, 1.0]
         end

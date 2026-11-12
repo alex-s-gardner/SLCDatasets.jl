@@ -1,7 +1,7 @@
 # Real Sentinel-1 IW geometry, rounded to values easy to check by hand: a 2.33 m range pixel, IW1
 # near range 800000 m, each subswath 20000 samples wide with a 200-sample overlap into the next.
 function _iw_annotation(swath::Int, mission::String, starting_range::Float64)
-    t = SLCDatasets.UtcTime(DateTime(2020, 1, 1), 0.0)
+    t = NanoDate(DateTime(2020, 1, 1))
     poly = [RangePolynomial(t, starting_range, (0.0, 0.0, 0.0))]
     return SLCDatasets.SubswathAnnotation(
         swath, "vv", 12345, mission, "SLC", "ascending",

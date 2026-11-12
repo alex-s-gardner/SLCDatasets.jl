@@ -240,15 +240,11 @@ end
 @noinline _bad_int_list(s, path) = throw(ArgumentError(
     "`$path` is not a list of integers: \"$s\""))
 
-# The epoch a product's times are reported against, truncated to the whole second.
-#
-# The reference's epoch is the anchor instant less two days exactly, keeping its microseconds; a
-# `DateTime` holds only milliseconds, so carrying them here would lose precision silently. Truncating
-# to the second instead and leaving the sub-second part in the times keeps `epoch + sensing_start` the
-# exact instant the product records. The consequence is that this package's `sensing_start` differs
-# from the reference's by the anchor's sub-second part — a constant both report identically once the
-# epoch is added back.
-epoch_of(t::UtcTime) = t.datetime - Dates.Day(S1_EPOCH_OFFSET_DAYS)
+# The epoch a product's times are reported against: the anchor instant less two days, truncated to the
+# whole second, with the sub-second part carried in the times. The reference keeps the anchor's
+# microseconds in its epoch instead, so this package's `sensing_start` differs from the reference's by
+# that sub-second part — a constant both report identically once the epoch is added back.
+epoch_of(t::NanoDate) = _whole_second(t) - Dates.Day(S1_EPOCH_OFFSET_DAYS)
 
 # One `<azimuthFmRatePolynomial>`-style element.
 #
@@ -307,7 +303,7 @@ struct SubswathAnnotation
     azimuth_time_interval::Float64
     lines_per_burst::Int
     samples_per_burst::Int
-    burst_start::Vector{UtcTime}
+    burst_start::Vector{NanoDate}
     # The valid region of each burst, parallel to `burst_start`. See `read_valid_region`; these are
     # 1-based inclusive bounds into the burst's own `lines_per_burst` x `samples_per_burst` extent.
     first_valid_line::Vector{Int}
@@ -410,7 +406,7 @@ function read_annotation(r::EzXML.Node, swath::Integer)
     lines_per_burst = _findint(r, "swathTiming/linesPerBurst")
 
     n = length(bursts)
-    burst_start = Vector{UtcTime}(undef, n)
+    burst_start = Vector{NanoDate}(undef, n)
     first_valid_line = Vector{Int}(undef, n)
     last_valid_line = Vector{Int}(undef, n)
     first_valid_sample = Vector{Int}(undef, n)
@@ -638,7 +634,7 @@ _leading_annotation(b::Sentinel1Backend) =
 # A burst's last line is a whole number of azimuth lines after its first, rather than a time read from
 # the product: the annotation gives only the start of each burst, and every burst carries
 # `linesPerBurst` lines.
-_burst_stop(a::SubswathAnnotation, start::UtcTime) =
+_burst_stop(a::SubswathAnnotation, start::NanoDate) =
     _advance(start, (a.lines_per_burst - 1) * a.azimuth_time_interval)
 
 # One burst's deramp parameters from a subswath annotation.
@@ -721,15 +717,15 @@ end
 # What a subswath's annotation says about the acquisition, over a window of it. Every Sentinel-1 SLC this
 # package returns — a mosaic, one burst, a merge of several — differs only in that window, so the record
 # itself is built once here.
-function _s1_identification(a::SubswathAnnotation, first_line::UtcTime, last_line::UtcTime)
+function _s1_identification(a::SubswathAnnotation, first_line::NanoDate, last_line::NanoDate)
     return Identification(
         a.mission,
         a.product_type,
         a.absolute_orbit,
         lowercase(a.pass_direction),
         S1_LOOK_SIDE == LookLeft ? "Left" : "Right",
-        _utc_string(first_line),
-        _utc_string(last_line),
+        first_line,
+        last_line,
         # The product's footprint is in `manifest.safe` rather than the annotation, and describing a
         # mosaic, a burst or a merge by the whole product's polygon would be wrong for all three.
         "",
@@ -738,10 +734,10 @@ end
 
 # The geometry of a window of one subswath: `nlines` rows from `start`, at the subswath's own range
 # origin and spacing. A single burst and a merge of bursts differ only in how many rows they span.
-function _s1_geometry(a::SubswathAnnotation, start::UtcTime, nlines::Integer, nsamples::Integer)
+function _s1_geometry(a::SubswathAnnotation, start::NanoDate, nlines::Integer, nsamples::Integer)
     stop = _advance(start, (nlines - 1) * a.azimuth_time_interval)
     epoch = epoch_of(start)
-    origin = UtcTime(epoch, 0.0)
+    origin = NanoDate(epoch)
     return RadarGeometry(
         a.starting_range,
         a.starting_range + (nsamples - 1.0) * a.range_pixel_spacing,
@@ -795,7 +791,7 @@ function _mosaic_geometry(b::Sentinel1Backend)
     nlines = round(Int, seconds_between(start, stop) * prf) + 1
 
     epoch = epoch_of(_anchor(b))
-    origin = UtcTime(epoch, 0.0)
+    origin = NanoDate(epoch)
     return RadarGeometry(
         starting_range,
         far_range,
@@ -852,14 +848,14 @@ scan stops once past it. A POEORB covers just over a day at one vector every ten
 acquisition needs a few, so filtering during the scan rather than after it is what keeps reading one
 cheap: a record whose time falls outside the window has its six numbers skipped entirely.
 """
-function read_eof_state_vectors(path::AbstractString; from::Union{Nothing,UtcTime} = nothing,
-                                to::Union{Nothing,UtcTime} = nothing, padding::Real = 0.0)
+function read_eof_state_vectors(path::AbstractString; from::Union{Nothing,NanoDate} = nothing,
+                                to::Union{Nothing,NanoDate} = nothing, padding::Real = 0.0)
     doc = readxml(path)
     list = findfirst("//Data_Block/List_of_OSVs", root(doc))
     list === nothing && throw(ArgumentError(
         "`$path` has no `Data_Block/List_of_OSVs` element, so it is not a Sentinel-1 orbit file"))
 
-    times = UtcTime[]
+    times = NanoDate[]
     positions = SVector{3,Float64}[]
     velocities = SVector{3,Float64}[]
     any_record = false
@@ -931,14 +927,14 @@ end
 #
 # `what` names the window in the error, since an orbit file that does not cover it is nearly always the
 # orbit of a different granule and the message has to say which window went unmatched.
-function _s1_orbit(orbit_path::AbstractString, start::UtcTime, stop::UtcTime, what::AbstractString)
+function _s1_orbit(orbit_path::AbstractString, start::NanoDate, stop::NanoDate, what::AbstractString)
     table = read_eof_state_vectors(orbit_path; from = start, to = stop,
                                    padding = S1_ORBIT_PADDING)
     isempty(table.time) && throw(ArgumentError(
         "`$orbit_path` has no state vectors within $(S1_ORBIT_PADDING) s of $what; it is probably " *
         "the orbit file of a different granule"))
 
-    epoch = UtcTime(epoch_of(start), 0.0)
+    epoch = NanoDate(epoch_of(start))
     return StateVectors(
         [seconds_between(epoch, t) for t in table.time],
         table.position,

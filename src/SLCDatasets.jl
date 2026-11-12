@@ -42,12 +42,13 @@ using ChunkManifests: H5File, HTTPTransport, LeafTransport, LocalTransport, S3Tr
                       http_request, http_resolve, fetchall, fetchranges, objectsize, ByteRange,
                       open_tiff, ZipMember, zip_members, read_member, extract_member, inflate_ranges!
 using Dates: DateTime
+using NanoDates: NanoDate
 import EzXML
 using EzXML: parsexml, readxml, root, findfirst, findall, nodecontent, nodename, eachelement
 using StaticArrays: SVector
 import Zarr
 
-export open_slc, bursts, orbit, nlines, nsamples, start_datetime, stop_datetime
+export open_slc, bursts, orbit, nlines, nsamples
 export repeat_interval, epoch_offset, nbursts
 export merge_bursts, pixels, amplitude, validmask
 # Whether the samples carry a TOPS azimuth ramp, which decides whether they may be interpolated. Exported

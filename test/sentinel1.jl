@@ -17,11 +17,12 @@
 # reader change made them diverge, the granule run would fail where the fixture run passed.
 
 using SLCDatasets
-using SLCDatasets: LookRight, SPEED_OF_LIGHT, Sentinel1Backend, UtcTime, seconds_between,
+using SLCDatasets: LookRight, SPEED_OF_LIGHT, Sentinel1Backend, seconds_between,
            parse_utc, read_eof_state_vectors, safe_polarizations, default_polarization,
            is_safe_product, annotation_xml, epoch_of, S1_ORBIT_PADDING,
            read_annotation, valid_lines, valid_samples
 using Dates
+using NanoDates: NanoDate
 using StaticArrays: SVector
 using JSON
 using Test
@@ -29,21 +30,13 @@ using Test
 norm3(v) = sqrt(v[1]^2 + v[2]^2 + v[3]^2)
 
 # An instant named as an epoch plus an offset in seconds, which is how both readers report their times.
-struct Instant
-    epoch::UtcTime
-    offset::Float64
-end
-
 # Ours, whose epoch is a whole second, and the reference's, whose epoch string carries microseconds.
-ours(epoch::DateTime, offset::Float64) = Instant(UtcTime(epoch, 0.0), offset)
-reference(epoch_string, offset::Float64) = Instant(parse_utc(epoch_string), offset)
-utc(stamp) = Instant(parse_utc(stamp), 0.0)
+ours(epoch::DateTime, offset::Float64) = SLCDatasets._advance(NanoDate(epoch), offset)
+reference(epoch_string, offset::Float64) = SLCDatasets._advance(parse_utc(epoch_string), offset)
+utc(stamp) = parse_utc(stamp)
 
-# Seconds from `b` to `a`, taking the difference of the epochs before adding the offsets. Differencing
-# the epochs first keeps every intermediate value the size of an acquisition rather than of the seconds
-# since some distant origin, where a `Float64` no longer resolves a nanosecond.
-seconds_apart(a::Instant, b::Instant) =
-    seconds_between(b.epoch, a.epoch) + (a.offset - b.offset)
+# Seconds from `b` to `a`, exact to the nanosecond either instant carries.
+seconds_apart(a::NanoDate, b::NanoDate) = seconds_between(b, a)
 
 # The products the golden values are checked against. By default each is rebuilt from the committed
 # inputs, which carry the annotation fields and state vectors of the granule verbatim. Setting
@@ -190,7 +183,7 @@ else
                 s = open_slc(p.safe; orbit = p.eof, swath = 1, burst = 1, polarization = pol)
                 anchor = parse_utc(iw1.sensing_start_utc)
                 @test s.geometry.epoch == epoch_of(anchor)
-                @test Dates.Day(anchor.datetime - s.geometry.epoch) == Dates.Day(2)
+                @test Dates.Day(SLCDatasets._whole_second(anchor) - s.geometry.epoch) == Dates.Day(2)
                 # The mosaic reports against IW1's first burst, not its own earliest line.
                 mosaic = open_slc(p.safe; orbit = p.eof, polarization = pol)
                 @test mosaic.geometry.epoch == epoch_of(anchor)
@@ -209,9 +202,9 @@ else
                 @test id.pass_direction in ("ascending", "descending")
                 # The mosaic's bounds are its own, so they match the geometry rather than one
                 # subswath's `productFirstLineUtcTime`.
-                @test seconds_apart(utc(id.start_time),
+                @test seconds_apart(id.start_time,
                                     ours(s.geometry.epoch, s.geometry.sensing_start)) ≈ 0 atol = 1e-6
-                @test start_datetime(id) <= stop_datetime(id)
+                @test id.start_time <= id.stop_time
             end
 
             @testset "invariants that need no reference" begin
@@ -267,17 +260,17 @@ end
 
 @testset "parse_utc" begin
     t = parse_utc("2015-11-20T08:02:04.790228")
-    @test t.datetime == DateTime("2015-11-20T08:02:04")
-    # The microseconds are kept out of the `DateTime`, which holds only milliseconds.
-    @test t.seconds ≈ 0.790228 atol = 1e-12
-    @test parse_utc("2015-11-20T08:02:04").seconds === 0.0
-    @test parse_utc("2015-11-20T08:02:04Z").datetime == DateTime("2015-11-20T08:02:04")
+    @test t == NanoDate(DateTime("2015-11-20T08:02:04.790")) + Dates.Microsecond(228)
+    @test parse_utc("2025-10-28T23:52:01.123456789") ==
+          NanoDate(DateTime("2025-10-28T23:52:01.123")) + Dates.Nanosecond(456_789)
+    @test parse_utc("2015-11-20T08:02:04") == NanoDate(DateTime("2015-11-20T08:02:04"))
+    @test parse_utc("2015-11-20T08:02:04Z") == NanoDate(DateTime("2015-11-20T08:02:04"))
+    @test SLCDatasets._utc_string(t) == "2015-11-20T08:02:04.790228"
     @test_throws "cannot read a UTC time" parse_utc("2015-11-20")
 end
 
 @testset "seconds_between is exact across a second boundary" begin
-    # Subtracting two `DateTime`s would round the sub-second parts away; a time that straddles a
-    # second must come out exact.
+    # A time that straddles a second must come out exact.
     a = parse_utc("2015-11-20T08:02:04.900000")
     b = parse_utc("2015-11-20T08:02:05.100000")
     @test seconds_between(a, b) ≈ 0.2 atol = 1e-12
