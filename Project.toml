@@ -1,6 +1,6 @@
 name = "SLCDatasets"
 uuid = "1d8f5cac-0b48-4ea8-8d35-4fce00b6c96f"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Alex S. Gardner, JPL/NASA"]
 
 [deps]
@@ -8,6 +8,7 @@ ChunkManifests = "558bc7c3-2be7-4981-9bcf-ba6cea128854"
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 DiskArrays = "3c3547ce-8d99-4f5e-a174-61eb10b00ae3"
 EzXML = "8f5d6c58-4d21-5cfd-889c-e3ad7ee6a615"
+NanoDates = "46f1a544-deae-4307-8689-c12aa3c955c6"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Zarr = "0a941bbe-ad1d-11e8-39d9-ab76183a1d99"
 ZarrCore = "77f5b75c-4c08-499f-ba13-550b0a0af171"
@@ -18,6 +19,7 @@ ChunkManifests = "0.1"
 Dates = "1"
 DiskArrays = "0.4"
 EzXML = "1"
+NanoDates = "2"
 StaticArrays = "1"
 Zarr = "0.11"
 ZarrCore = "0.11.1"

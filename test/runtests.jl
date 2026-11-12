@@ -1,4 +1,5 @@
 using SLCDatasets
+using NanoDates: NanoDate
 using Test
 import DiskArrays
 

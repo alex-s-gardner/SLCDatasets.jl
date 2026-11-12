@@ -48,6 +48,6 @@ let opened = @elapsed(s = SLCDatasets._open_nisar(RemoteHTTP(LIVE_URL); frequenc
 
         @test s.identification.mission == FIXTURE.identification.mission
         @test s.identification.absolute_orbit == FIXTURE.identification.absolute_orbit
-        @test s.identification.start_time == FIXTURE.identification.start_time
+        @test s.identification.start_time == SLCDatasets.parse_utc(FIXTURE.identification.start_time)
     end
 end

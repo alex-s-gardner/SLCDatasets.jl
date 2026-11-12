@@ -90,7 +90,7 @@ end
     # `r0` is a range, not an index: the argument is `range - r0`, so the constant term is the value there.
     # Getting this wrong would evaluate every polynomial at a range hundreds of kilometers off and is not
     # visible in a round trip, since remove and reapply would share the error.
-    t = SLCDatasets.UtcTime(DateTime(2020, 1, 1, 0, 0, 0), 0.0)
+    t = NanoDate(DateTime(2020, 1, 1, 0, 0, 0))
     p = RangePolynomial(t, 800_000.0, (2.0, 3.0, 4.0))
     @test p(800_000.0) == 2.0
     @test p(800_001.0) == 2.0 + 3.0 + 4.0
@@ -105,7 +105,7 @@ end
     # time. An off-by-one here would deramp with a neighbour's coefficients: plausible, and wrong in a way
     # that grows with how fast the estimates vary.
     base = DateTime(2020, 1, 1, 0, 0, 0)
-    at(s) = SLCDatasets.UtcTime(base, s)
+    at(s) = SLCDatasets._advance(NanoDate(base), s)
     polys = [RangePolynomial(at(0.0), 800_000.0, (1.0, 0.0, 0.0)),
              RangePolynomial(at(10.0), 800_000.0, (2.0, 0.0, 0.0)),
              RangePolynomial(at(20.0), 800_000.0, (3.0, 0.0, 0.0))]
@@ -238,8 +238,7 @@ end
             # The mid-time is half a burst after its start, which is what the ramp is referenced to and what
             # an orbit is interpolated at.
             g = b[1].geometry
-            @test SLCDatasets.seconds_between(
-                SLCDatasets.UtcTime(g.epoch, g.sensing_start), d.burst_mid) ≈
+            @test SLCDatasets.seconds_between(g.epoch, d.burst_mid) - g.sensing_start ≈
                   (d.lines_per_burst - 1) * d.azimuth_time_interval / 2
 
             # A later burst selects its own estimate, not the first one. With one estimate per burst that is

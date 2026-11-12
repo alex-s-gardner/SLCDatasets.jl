@@ -188,8 +188,8 @@ function read_identification(b::NisarBackend, f::H5File)
         _scalar_int(f, g * "/absoluteOrbitNumber"),
         get_str("orbitPassDirection"),
         get_str("lookDirection"),
-        get_str("zeroDopplerStartTime"),
-        get_str("zeroDopplerEndTime"),
+        parse_utc(_text(f, g * "/zeroDopplerStartTime")),
+        parse_utc(_text(f, g * "/zeroDopplerEndTime")),
         get_str("boundingPolygon"),
     )
 end
