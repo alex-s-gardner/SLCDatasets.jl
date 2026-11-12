@@ -9,6 +9,7 @@
 # `reference/extract_sentinel1_inputs.jl` is what produced these files.
 
 using JSON
+using Dates: DateTime, value as ms_value
 
 # The golden-value files, each naming the granule its values were dumped from.
 const S1_GOLDEN = ["sentinel1_metadata.json", "sentinel1_metadata_s1b.json"]
@@ -29,12 +30,20 @@ function s1_valid_sample_arrays(region::AbstractDict, lines_per_burst::Integer)
     return firsts, lasts
 end
 
+# Burst `i`'s seconds from an ascending node placed 1000 s before the subswath's first burst.
+function s1_anx_time(sw::AbstractDict, i::Integer)
+    t = sw["burstAzimuthTimes"]
+    return 1000.0 + ms_value(DateTime(t[i][1:23]) - DateTime(t[1][1:23])) / 1000
+end
+
 function s1_annotation_document(sw::AbstractDict)
     lines_per_burst = parse(Int, String(sw["linesPerBurst"]))
     regions = sw["burstValidRegions"]
     bursts = join(begin
                       firsts, lasts = s1_valid_sample_arrays(regions[i], lines_per_burst)
+                      # The fixture's ascending node is the first burst's start, less 1000 s.
                       "<burst><azimuthTime>$t</azimuthTime>" *
+                      "<azimuthAnxTime>$(s1_anx_time(sw, i))</azimuthAnxTime>" *
                       "<firstValidSample>$firsts</firstValidSample>" *
                       "<lastValidSample>$lasts</lastValidSample></burst>"
                   end

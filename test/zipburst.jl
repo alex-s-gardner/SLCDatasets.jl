@@ -130,7 +130,7 @@ if !isempty(S1_PRODUCTS)
             @test [[b.burst for b in g] for g in q.bursts] == [[2], [2, 3], [1]]
             whole = Sentinel1Product(zp; orbit = p.eof, polarization = pol)
             a, w = SLCDatasets.annotation(q, 2), SLCDatasets.annotation(whole, 2)
-            per_burst = (:burst_start, :first_valid_line, :last_valid_line, :first_valid_sample, :last_valid_sample)
+            per_burst = (:burst_start, :burst_anx_time, :first_valid_line, :last_valid_line, :first_valid_sample, :last_valid_sample)
             for f in fieldnames(SubswathAnnotation)
                 f in (:azimuth_fm_rate, :doppler_centroid) && continue
                 @test isequal(getfield(a, f), f in per_burst ? getfield(w, f)[2:3] : getfield(w, f))
@@ -139,8 +139,8 @@ if !isempty(S1_PRODUCTS)
             @test r[:, :] == rasters[2][(L[2] + 1):(3L[2]), :]
             @test q.path == asf_safe_name(picked)
 
-            # The fixture's annotations carry neither burst times from the ascending node nor a grid.
-            @test_throws "no `azimuthAnxTime` element" burst_footprints(zp, 2, pol)
+            # The fixture's annotations carry burst times from the ascending node but no grid.
+            @test_throws "geolocation" burst_footprints(zp, 2, pol)
 
             spec = zip_burst_spec(picked[1])
             @test spec == zp * "#IW2/$(uppercase(pol))/2" && is_zip_burst_spec(spec)

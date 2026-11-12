@@ -452,6 +452,7 @@ end
         <samplesPerBurst>$samples</samplesPerBurst>
         <burstList count="1"><burst>
           <azimuthTime>2020-01-01T00:00:00.000000</azimuthTime>
+          <azimuthAnxTime>1000.0</azimuthAnxTime>
           <firstValidSample>$firsts</firstValidSample>
           <lastValidSample>$lasts</lastValidSample>
         </burst></burstList></swathTiming>

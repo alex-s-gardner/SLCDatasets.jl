@@ -298,7 +298,7 @@ function _assembled_swath(bs::Vector{B}, swath::Int) where {B<:Union{AsfBurst,Zi
         swath, head.polarization, head.absolute_orbit, head.mission, head.product_type, head.pass_direction,
         head.starting_range, head.range_pixel_spacing, head.wavelength, head.azimuth_time_interval,
         lpb, maximum(b -> parents[b.slc].samples_per_burst, sorted),
-        starts, pick(a -> a.first_valid_line), pick(a -> a.last_valid_line), pick(a -> a.first_valid_sample),
+        starts, Float64[parents[b.slc].burst_anx_time[b.burst] for b in sorted], pick(a -> a.first_valid_line), pick(a -> a.last_valid_line), pick(a -> a.first_valid_sample),
         pick(a -> a.last_valid_sample), head.azimuth_steering_rate,
         _within(_merged(lists(a -> a.azimuth_fm_rate)), first(starts), span_end, 500.0),
         _within(_merged(lists(a -> a.doppler_centroid)), first(starts), span_end, 3.0))

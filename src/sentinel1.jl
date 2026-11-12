@@ -304,6 +304,10 @@ struct SubswathAnnotation
     lines_per_burst::Int
     samples_per_burst::Int
     burst_start::Vector{NanoDate}
+    # Each burst's `azimuthAnxTime`, parallel to `burst_start`: seconds from the orbit's ascending node to
+    # the burst's start. A burst of one track lies at the same time after the node on every pass, to well
+    # under a burst's length, so this identifies the burst across passes and spacecraft.
+    burst_anx_time::Vector{Float64}
     # The valid region of each burst, parallel to `burst_start`. See `read_valid_region`; these are
     # 1-based inclusive bounds into the burst's own `lines_per_burst` x `samples_per_burst` extent.
     first_valid_line::Vector{Int}
@@ -407,12 +411,14 @@ function read_annotation(r::EzXML.Node, swath::Integer)
 
     n = length(bursts)
     burst_start = Vector{NanoDate}(undef, n)
+    burst_anx_time = Vector{Float64}(undef, n)
     first_valid_line = Vector{Int}(undef, n)
     last_valid_line = Vector{Int}(undef, n)
     first_valid_sample = Vector{Int}(undef, n)
     last_valid_sample = Vector{Int}(undef, n)
     for (i, b) in enumerate(bursts)
         burst_start[i] = parse_utc(_findtext(b, "azimuthTime"))
+        burst_anx_time[i] = _findfloat(b, "azimuthAnxTime")
         first_valid_line[i], last_valid_line[i], first_valid_sample[i], last_valid_sample[i] =
             read_valid_region(b, swath, i, lines_per_burst)
     end
@@ -444,6 +450,7 @@ function read_annotation(r::EzXML.Node, swath::Integer)
         lines_per_burst,
         _findint(r, "swathTiming/samplesPerBurst"),
         burst_start,
+        burst_anx_time,
         first_valid_line,
         last_valid_line,
         first_valid_sample,
