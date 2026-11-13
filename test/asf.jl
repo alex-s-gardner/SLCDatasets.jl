@@ -85,7 +85,7 @@ if !isempty(S1_PRODUCTS)
         @test [(b.slc, b.burst) for b in q.bursts[2]] ==
               [(first_slc, 2), (first_slc, 3), (second_slc, 1), (second_slc, 2)]
         a, whole = SLCDatasets.annotation(q, 2), SLCDatasets.annotation(safe, 2)
-        per_burst = (:burst_start, :first_valid_line, :last_valid_line, :first_valid_sample, :last_valid_sample)
+        per_burst = (:burst_start, :burst_anx_time, :first_valid_line, :last_valid_line, :first_valid_sample, :last_valid_sample)
         # `isequal`: the fixture carries no steering rate, which reads as `NaN`.
         for f in fieldnames(SubswathAnnotation)
             @test isequal(getfield(a, f), f in per_burst ? getfield(whole, f)[2:5] : getfield(whole, f))

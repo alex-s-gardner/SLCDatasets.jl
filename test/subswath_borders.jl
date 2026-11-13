@@ -7,7 +7,7 @@ function _iw_annotation(swath::Int, mission::String, starting_range::Float64)
         swath, "vv", 12345, mission, "SLC", "ascending",
         starting_range, 2.33,
         0.05546576, 0.002, 1500, 20000,
-        [t], [0], [1499], [0], [19999],
+        [t], [0.0], [0], [1499], [0], [19999],
         0.0, poly, poly)
 end
 
